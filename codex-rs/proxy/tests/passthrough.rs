@@ -1,5 +1,6 @@
 use assert_cmd::cargo::CommandCargoExt;
 use reqwest::Client;
+use reqwest::multipart;
 use std::time::Duration;
 use tempfile::TempDir;
 use wiremock::Mock;
@@ -69,6 +70,85 @@ async fn proxies_chat_completions_with_auth_passthrough() -> anyhow::Result<()> 
     assert!(resp.status().is_success());
     let val: serde_json::Value = resp.json().await?;
     assert_eq!(val["choices"][0]["message"]["content"], "hi");
+
+    let _ = child.kill();
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxies_multipart_file_upload() -> anyhow::Result<()> {
+    // Upstream mock server that records requests
+    let upstream = MockServer::start().await;
+    let template = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "id": "file_123",
+        "object": "file",
+        "filename": "image.jpg"
+    }));
+    Mock::given(method("POST"))
+        .and(path("/v1/files"))
+        .respond_with(template)
+        .mount(&upstream)
+        .await;
+
+    // Start proxy on a free port
+    let port = portpicker::pick_unused_port().expect("pick port");
+    let codex_home = TempDir::new()?;
+    let mut cmd = std::process::Command::cargo_bin("codex-proxy")?;
+    cmd.arg("--bind")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("-c")
+        .arg(format!(
+            "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", wire_api = \"chat\" }}",
+            upstream.uri()
+        ))
+        .arg("-c")
+        .arg("model_provider=\"mock\"")
+        .env("CODEX_HOME", codex_home.path());
+    let mut child = cmd.spawn()?;
+
+    // Wait for health
+    let client = Client::builder().timeout(Duration::from_secs(3)).build()?;
+    let base = format!("http://127.0.0.1:{port}");
+    for _ in 0..50u8 {
+        if client.get(format!("{base}/health")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Build a ~1.5MiB payload to ensure we exercise streaming path
+    let data = vec![0u8; 1_500_000];
+    let part = multipart::Part::bytes(data)
+        .file_name("image.jpg")
+        .mime_str("image/jpeg")?;
+    let form = multipart::Form::new()
+        .text("purpose", "assistants")
+        .part("file", part);
+
+    let resp = client
+        .post(format!("{base}/v1/files"))
+        .header("Authorization", "Bearer test-token")
+        .multipart(form)
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+
+    // Inspect what the upstream saw
+    let requests = upstream
+        .received_requests()
+        .await
+        .expect("failed to fetch received requests");
+    let upload = requests
+        .iter()
+        .find(|r| r.url.path() == "/v1/files" && r.method.as_str() == "POST")
+        .expect("upstream received upload");
+    let ct = upload
+        .headers
+        .get("content-type")
+        .expect("content-type present");
+    let ct_val = ct.to_str().unwrap();
+    assert!(ct_val.starts_with("multipart/form-data"));
+    assert!(upload.body.len() > 1_000_000);
 
     let _ = child.kill();
     Ok(())

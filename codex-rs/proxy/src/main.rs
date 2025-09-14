@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 use anyhow::Context;
 use axum::Router;
 use axum::body::Body as AxumBody;
-use axum::body::to_bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::HeaderName;
@@ -26,6 +25,7 @@ use codex_core::default_client::create_client;
 use futures_util::TryStreamExt;
 use reqwest::Client;
 use serde::Serialize;
+use std::io;
 use tokio::net::TcpListener;
 use tower_http::cors::Any;
 use tower_http::cors::CorsLayer;
@@ -58,7 +58,7 @@ struct AppState {
     hop_by_hop: HashSet<HeaderName>,
 }
 
-const MAX_REQ_BODY_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
+// Stream request bodies rather than buffering to support large uploads.
 
 #[derive(Serialize)]
 struct Health {
@@ -154,11 +154,6 @@ async fn proxy_v1(
     }; // keep leading '/'
     let upstream_url = format!("{}{}", state.upstream_base_v1, tail);
 
-    // Collect body bytes
-    let body_bytes = to_bytes(body, MAX_REQ_BODY_BYTES)
-        .await
-        .map_err(internal_error)?;
-
     // Build upstream request
     let mut builder = state
         .client
@@ -207,7 +202,12 @@ async fn proxy_v1(
     }
 
     if requires_body(&method) {
-        builder = builder.body(body_bytes);
+        // Stream request body to upstream (supports large multipart uploads).
+        let stream = body
+            .into_data_stream()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+        let reqwest_body = reqwest::Body::wrap_stream(stream);
+        builder = builder.body(reqwest_body);
     }
 
     // Send
