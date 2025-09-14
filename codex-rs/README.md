@@ -100,3 +100,101 @@ This folder is the root of a Cargo workspace. It contains quite a bit of experim
 - [`exec/`](./exec) "headless" CLI for use in automation.
 - [`tui/`](./tui) CLI that launches a fullscreen TUI built with [Ratatui](https://ratatui.rs/).
 - [`cli/`](./cli) CLI multitool that provides the aforementioned CLIs via subcommands.
+
+### OpenAI‑Compatible Passthrough (codex‑proxy)
+
+Run a local HTTP server that forwards any `/v1/*` request to your configured provider. Useful for pointing OpenAI SDKs at `localhost` or for tooling that expects an OpenAI‑compatible API.
+
+Start the proxy
+
+```bash
+cargo run -p codex-proxy -- --bind 127.0.0.1:11435
+# Optional: enable permissive CORS for browser apps
+# cargo run -p codex-proxy -- --bind 127.0.0.1:11435 --allow-cors-any
+```
+
+Provider selection
+
+- By default, the proxy uses the active `model_provider` from `~/.codex/config.toml`.
+- You can override via `-c` flags (same as Codex CLI). Example: forward to a mock server (or Ollama/OpenAI‑compatible gateway) at `http://localhost:11434/v1`:
+
+```bash
+cargo run -p codex-proxy -- \
+  -c 'model_providers.mock={ name = "mock", base_url = "http://localhost:11434/v1", wire_api = "chat" }' \
+  -c 'model_provider="mock"'
+```
+
+Auth behavior
+
+- If the incoming request includes `Authorization: Bearer …`, the header is forwarded unchanged.
+- Otherwise the proxy injects auth using (in order):
+  - Provider `env_key` (e.g., `OPENAI_API_KEY`) from your environment, if configured in the provider.
+  - Your ChatGPT token from `~/.codex/auth.json` when available.
+
+Health
+
+- `GET /health` returns `{ "status": "ok" }`.
+
+Examples
+
+Chat Completions via curl
+
+```bash
+curl -sS http://127.0.0.1:11435/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer $OPENAI_API_KEY' \
+  -d '{
+        "model": "gpt-4o-mini",
+        "messages": [ {"role":"user","content":"Hello"} ]
+      }'
+```
+
+Streaming (SSE) via curl
+
+```bash
+curl -N http://127.0.0.1:11435/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer $OPENAI_API_KEY' \
+  -d '{
+        "model": "gpt-4o-mini",
+        "stream": true,
+        "messages": [ {"role":"user","content":"Hello"} ]
+      }'
+```
+
+File/image upload (multipart)
+
+```bash
+curl -sS http://127.0.0.1:11435/v1/files \
+  -H 'Authorization: Bearer $OPENAI_API_KEY' \
+  -F purpose=assistants \
+  -F file=@image.jpg
+```
+
+SDK setup (Node & Python)
+
+```ts
+// Node
+import OpenAI from "openai";
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, baseURL: "http://127.0.0.1:11435/v1" });
+const chat = await client.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "Hello" }],
+});
+```
+
+```py
+# Python
+from openai import OpenAI
+client = OpenAI(api_key="YOUR_KEY", base_url="http://127.0.0.1:11435/v1")
+resp = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+Notes
+
+- The proxy streams request and response bodies end‑to‑end, so large multipart uploads and SSE streams are supported.
+- Hop‑by‑hop headers (Connection, TE, etc.) are stripped; all other headers are forwarded.
+- For browser apps, pass `--allow-cors-any` during local development.
