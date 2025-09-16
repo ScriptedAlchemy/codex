@@ -244,7 +244,7 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             proto::run_main(proto_cli).await?;
         }
         Some(Subcommand::Proxy(mut proxy_cli)) => {
-            prepend_config_flags(&mut proxy_cli.config, cli.config_overrides);
+            prepend_config_flags(&mut proxy_cli.config, root_config_overrides.clone());
             codex_proxy::run(proxy_cli).await?;
         }
         Some(Subcommand::Completion(completion_cli)) => {
