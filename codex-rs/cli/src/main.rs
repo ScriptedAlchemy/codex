@@ -14,6 +14,7 @@ use codex_cli::login::run_logout;
 use codex_cli::proto;
 use codex_common::CliConfigOverrides;
 use codex_exec::Cli as ExecCli;
+use codex_proxy::ProxyCommand as ProxyCli;
 use codex_tui::Cli as TuiCli;
 use std::path::PathBuf;
 
@@ -65,6 +66,9 @@ enum Subcommand {
     /// Run the Protocol stream via stdin/stdout
     #[clap(visible_alias = "p")]
     Proto(ProtoCli),
+
+    /// Run the OpenAI-compatible HTTP passthrough proxy.
+    Proxy(ProxyCli),
 
     /// Generate shell completion scripts.
     Completion(CompletionCommand),
@@ -238,6 +242,10 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 root_config_overrides.clone(),
             );
             proto::run_main(proto_cli).await?;
+        }
+        Some(Subcommand::Proxy(mut proxy_cli)) => {
+            prepend_config_flags(&mut proxy_cli.config, cli.config_overrides);
+            codex_proxy::run(proxy_cli).await?;
         }
         Some(Subcommand::Completion(completion_cli)) => {
             print_completion(completion_cli);

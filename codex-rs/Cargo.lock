@@ -715,6 +715,7 @@ dependencies = [
  "codex-mcp-server",
  "codex-protocol",
  "codex-protocol-ts",
+ "codex-proxy",
  "codex-tui",
  "predicates",
  "pretty_assertions",

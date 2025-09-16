@@ -17,6 +17,10 @@ set -euo pipefail
 
 CODEX_CLI_ROOT=""
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../codex-rs" && pwd)"
+
 # Until we start publishing stable GitHub releases, we have to grab the binaries
 # from the GitHub Action that created them. Update the URL below to point to the
 # appropriate workflow run:
@@ -51,14 +55,45 @@ if [ -n "$CODEX_CLI_ROOT" ]; then
   BIN_DIR="$CODEX_CLI_ROOT/bin"
 else
   # No argument; fall back to the repo’s own bin directory.
-  # Resolve the path of this script, then walk up to the repo root.
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   CODEX_CLI_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
   BIN_DIR="$CODEX_CLI_ROOT/bin"
 fi
 
 # Make sure the destination directory exists.
 mkdir -p "$BIN_DIR"
+
+# ----------------------------------------------------------------------------
+# Local fallback: build the CLI binary for the host platform instead of
+# downloading from CI. Intended for local packaging via scripts/local-release.sh.
+# ----------------------------------------------------------------------------
+
+if [[ -n "${CODEX_LOCAL_BUILD:-}" ]]; then
+  echo "Building codex CLI locally for host platform..."
+  (cd "$WORKSPACE_ROOT" && cargo build --release -p codex-cli)
+
+  HOST_TRIPLE="$(rustc -vV | awk '/^host: / { print $2 }')"
+  if [[ -z "$HOST_TRIPLE" ]]; then
+    echo "Failed to determine rustc host triple" >&2
+    exit 1
+  fi
+
+  EXT=""
+  if [[ "$HOST_TRIPLE" == *"windows"* ]]; then
+    EXT=".exe"
+  fi
+
+  SRC_BINARY="$WORKSPACE_ROOT/target/release/codex$EXT"
+  if [[ ! -f "$SRC_BINARY" ]]; then
+    echo "Expected binary not found at $SRC_BINARY" >&2
+    exit 1
+  fi
+
+  DEST_BINARY="$BIN_DIR/codex-$HOST_TRIPLE$EXT"
+  cp "$SRC_BINARY" "$DEST_BINARY"
+  chmod +x "$DEST_BINARY"
+  echo "Installed locally built binary -> $DEST_BINARY"
+  exit 0
+fi
 
 # ----------------------------------------------------------------------------
 # Download and decompress the artifacts from the GitHub Actions workflow.

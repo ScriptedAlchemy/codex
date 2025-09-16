@@ -76,6 +76,61 @@ async fn proxies_chat_completions_with_auth_passthrough() -> anyhow::Result<()> 
 }
 
 #[tokio::test]
+async fn proxies_responses_with_injected_auth() -> anyhow::Result<()> {
+    let upstream = MockServer::start().await;
+    let template = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "id": "resp_123",
+        "output": [{ "type": "message", "content": [{ "type": "output_text", "text": "ok" }] }]
+    }));
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer sk-test"))
+        .respond_with(template)
+        .mount(&upstream)
+        .await;
+
+    let port = portpicker::pick_unused_port().expect("pick port");
+    let codex_home = TempDir::new()?;
+    let mut cmd = std::process::Command::cargo_bin("codex-proxy")?;
+    cmd.arg("--bind")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("-c")
+        .arg(format!(
+            "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"MOCK_API_KEY\", wire_api = \"responses\" }}",
+            upstream.uri()
+        ))
+        .arg("-c")
+        .arg("model_provider=\"mock\"")
+        .env("CODEX_HOME", codex_home.path())
+        .env("MOCK_API_KEY", "sk-test");
+    let mut child = cmd.spawn()?;
+
+    let client = Client::builder().timeout(Duration::from_secs(3)).build()?;
+    let base = format!("http://127.0.0.1:{port}");
+    for _ in 0..50u8 {
+        if client.get(format!("{base}/health")).send().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let resp = client
+        .post(format!("{base}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "gpt-4o-mini",
+            "input": [{ "role": "user", "content": [{ "type": "input_text", "text": "ping" }] }]
+        }))
+        .send()
+        .await?;
+    assert!(resp.status().is_success());
+    let val: serde_json::Value = resp.json().await?;
+    assert_eq!(val["output"][0]["content"][0]["text"], "ok");
+
+    let _ = child.kill();
+    Ok(())
+}
+
+#[tokio::test]
 async fn proxies_multipart_file_upload() -> anyhow::Result<()> {
     // Upstream mock server that records requests
     let upstream = MockServer::start().await;
