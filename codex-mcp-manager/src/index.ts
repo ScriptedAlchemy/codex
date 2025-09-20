@@ -170,12 +170,13 @@ function cloneEnv(): Record<string, string> {
   );
 }
 
-function getNextRequestId(client: Client): string {
-  const raw = Reflect.get(client as object, "_requestMessageId");
-  if (typeof raw === "number" || typeof raw === "string") {
-    return String(raw);
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+// Queue of callbacks that capture the actual JSON‑RPC id for the next
+// outgoing `tools/call` request to the "codex" tool. This avoids relying on
+// private SDK internals for correlating notifications to requests.
+const requestIdCaptureQueue: Array<(id: string) => void> = [];
+
+function scheduleNextCodexRequestIdCapture(assign: (id: string) => void): void {
+  requestIdCaptureQueue.push(assign);
 }
 
 async function loadState(): Promise<ConversationState> {
@@ -438,6 +439,35 @@ async function connectToCodex(): Promise<{
   );
 
   await client.connect(transport);
+
+  // Wrap transport.send to capture the actual JSON-RPC id assigned by the SDK
+  // for the next outgoing tools/call to the "codex" tool. This provides a
+  // stable, public way to correlate notifications that include
+  // params._meta.requestId without touching private fields.
+  const anyTransport = transport as unknown as {
+    send: (message: unknown, ...rest: unknown[]) => Promise<void>;
+  };
+  const originalSend = anyTransport.send.bind(transport);
+  anyTransport.send = (message: unknown, ...rest: unknown[]) => {
+    try {
+      const m = message as { jsonrpc?: string; id?: unknown; method?: string; params?: any };
+      if (
+        m &&
+        m.jsonrpc === "2.0" &&
+        m.method === "tools/call" &&
+        (m.params?.name === "codex" || m.params?.name === "codex-reply") &&
+        (typeof m.id === "number" || typeof m.id === "string") &&
+        requestIdCaptureQueue.length > 0
+      ) {
+        const capture = requestIdCaptureQueue.shift();
+        capture?.(String(m.id));
+      }
+    } catch {
+      // Never let correlation logic interfere with transport
+    }
+    return originalSend(message, ...rest);
+  };
+
   return { client, transport };
 }
 
@@ -768,7 +798,12 @@ server.registerResource(
       mapCodexArgumentsFromStart(args);
     const promptSummary = summarizePrompt(args.prompt);
 
-    const requestId = getNextRequestId(codexClient);
+    // Generate a local token for forwarding; the actual JSON-RPC id will be
+    // captured from the transport when the request is sent.
+    const localRequestToken = `${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
+    let actualRequestId: string | null = null;
     const events: Notification[] = [];
     const outputChunks: string[] = [];
 
@@ -801,7 +836,7 @@ server.registerResource(
         sendNotification({
           method: "codex-manager-event",
           params: {
-            requestId,
+            requestId: actualRequestId ?? localRequestToken,
             notification,
           },
         });
@@ -817,7 +852,12 @@ server.registerResource(
       conversationEntry: undefined,
       error: null,
     };
-    pendingRequests.set(requestId, pendingEntry);
+    // Capture the JSON-RPC id assigned to the following call and register the
+    // pending entry only once we know the real id.
+    scheduleNextCodexRequestIdCapture((rid) => {
+      actualRequestId = rid;
+      pendingRequests.set(rid, pendingEntry);
+    });
 
     let result: ManagerCallToolResult | undefined;
     try {
@@ -834,11 +874,15 @@ server.registerResource(
         },
       )) as ManagerCallToolResult;
     } catch (error) {
-      pendingRequests.delete(requestId);
+      if (actualRequestId) {
+        pendingRequests.delete(actualRequestId);
+      }
       throw error;
     }
 
-    pendingRequests.delete(requestId);
+    if (actualRequestId) {
+      pendingRequests.delete(actualRequestId);
+    }
 
     if (pendingEntry.error) {
       throw pendingEntry.error;
@@ -926,7 +970,10 @@ server.registerResource(
       });
     }
 
-    const requestId = getNextRequestId(codexClient);
+    const localRequestToken = `${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 10)}`;
+    let actualRequestId: string | null = null;
     const events: Notification[] = [];
     const outputChunks: string[] = [];
 
@@ -937,7 +984,7 @@ server.registerResource(
         sendNotification({
           method: "codex-manager-event",
           params: {
-            requestId,
+            requestId: actualRequestId ?? localRequestToken,
             notification,
           },
         });
@@ -953,8 +1000,10 @@ server.registerResource(
       conversationEntry: entry,
       error: null,
     };
-
-    pendingRequests.set(requestId, pendingEntry);
+    scheduleNextCodexRequestIdCapture((rid) => {
+      actualRequestId = rid;
+      pendingRequests.set(rid, pendingEntry);
+    });
 
     let result: ManagerCallToolResult | undefined;
     try {
@@ -974,7 +1023,9 @@ server.registerResource(
         },
       )) as ManagerCallToolResult;
     } finally {
-      pendingRequests.delete(requestId);
+      if (actualRequestId) {
+        pendingRequests.delete(actualRequestId);
+      }
     }
 
     if (result?.isError) {
