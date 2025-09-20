@@ -678,6 +678,11 @@ impl Session {
         };
         child_config.cwd = resolved_cwd;
 
+        // Note: In v1 we interpret `max_runtime_ms` as a maximum IDLE window
+        // (time since last activity) rather than absolute wall‑clock runtime.
+        // The idle timer will be refreshed by the reply runner whenever the
+        // child produces output (AgentMessageDelta / AgentReasoningDelta). The
+        // enforcement lives in the reply/nonblocking task runner.
         let max_runtime = max_runtime_ms.map(Duration::from_millis);
 
         let manager = ConversationManager::new(Arc::clone(&self.auth_manager));
@@ -3904,7 +3909,9 @@ mod tests {
             mcp_connection_manager: McpConnectionManager::default(),
             session_manager: ExecSessionManager::default(),
             unified_exec_manager: UnifiedExecSessionManager::default(),
-            auth_manager: crate::AuthManager::from_auth_for_testing(crate::CodexAuth::from_api_key("dummy")),
+            auth_manager: crate::AuthManager::from_auth_for_testing(
+                crate::CodexAuth::from_api_key("dummy"),
+            ),
             notify: None,
             rollout: Mutex::new(None),
             state: Mutex::new(State {
