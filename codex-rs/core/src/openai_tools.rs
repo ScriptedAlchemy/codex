@@ -67,6 +67,7 @@ pub(crate) struct ToolsConfig {
     pub apply_patch_tool_type: Option<ApplyPatchToolType>,
     pub web_search_request: bool,
     pub include_view_image_tool: bool,
+    pub include_subagent_tool: bool,
     pub experimental_unified_exec_tool: bool,
 }
 
@@ -77,6 +78,7 @@ pub(crate) struct ToolsConfigParams<'a> {
     pub(crate) include_web_search_request: bool,
     pub(crate) use_streamable_shell_tool: bool,
     pub(crate) include_view_image_tool: bool,
+    pub(crate) include_subagent_tool: bool,
     pub(crate) experimental_unified_exec_tool: bool,
 }
 
@@ -89,6 +91,7 @@ impl ToolsConfig {
             include_web_search_request,
             use_streamable_shell_tool,
             include_view_image_tool,
+            include_subagent_tool,
             experimental_unified_exec_tool,
         } = params;
         let shell_type = if *use_streamable_shell_tool {
@@ -117,6 +120,7 @@ impl ToolsConfig {
             apply_patch_tool_type,
             web_search_request: *include_web_search_request,
             include_view_image_tool: *include_view_image_tool,
+            include_subagent_tool: *include_subagent_tool,
             experimental_unified_exec_tool: *experimental_unified_exec_tool,
         }
     }
@@ -271,6 +275,230 @@ fn create_view_image_tool() -> OpenAiTool {
         parameters: JsonSchema::Object {
             properties,
             required: Some(vec!["path".to_string()]),
+            additional_properties: Some(false),
+        },
+    })
+}
+
+fn create_subagent_open_tool() -> OpenAiTool {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "goal".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Unique, narrow objective for this subagent. Keep it specific and outcome‑oriented (include acceptance criteria when possible). Avoid multi‑part or open‑ended goals; open multiple subagents instead.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "system_prompt".to_string(),
+        JsonSchema::String {
+            description: Some("Optional system instructions narrowing scope/role. Summarize constraints, interfaces, and handoff format. (Tip: outline roles with update_plan before opening several subagents.)".to_string()),
+        },
+    );
+    properties.insert(
+        "model".to_string(),
+        JsonSchema::String {
+            description: Some("Optional model slug override for the subagent.".to_string()),
+        },
+    );
+    properties.insert(
+        "approval_policy".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional approval policy (e.g., on-request, untrusted).".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "sandbox_mode".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional sandbox mode (read-only | workspace-write | danger-full-access). Workspace-write grants write access to the workspace even if the parent is read-only.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "cwd".to_string(),
+        JsonSchema::String {
+            description: Some("Optional working directory override for the subagent.".to_string()),
+        },
+    );
+    properties.insert(
+        "max_turns".to_string(),
+        JsonSchema::Number {
+            description: Some(
+                "Optional safety cap on how many replies this subagent may produce before requiring an explicit extension.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "max_runtime_ms".to_string(),
+        JsonSchema::Number {
+            description: Some(
+                "Optional max idle time in milliseconds. Interpreted as a maximum time without output from the subagent; activity refreshes the timer. Use ~1_800_000 (30 min) when unsure.".to_string(),
+            ),
+        },
+    );
+
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "subagent.open".to_string(),
+        description: "Open a child Codex (chatty subagent) dedicated to a single, well‑scoped goal. Prefer several focused subagents over one broad one. The scheduler treats max_runtime_ms as a max idle window, not strict wall time."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["goal".to_string()]),
+            additional_properties: Some(false),
+        },
+    })
+}
+
+fn create_subagent_reply_tool() -> OpenAiTool {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "subagent_id".to_string(),
+        JsonSchema::String {
+            description: Some("Identifier returned by subagent.open.".to_string()),
+        },
+    );
+    properties.insert(
+        "message".to_string(),
+        JsonSchema::String {
+            description: Some("Message content to deliver to the subagent.".to_string()),
+        },
+    );
+    properties.insert(
+        "images".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::String {
+                description: Some("Absolute filesystem path to an image to attach.".to_string()),
+            }),
+            description: Some("Optional list of images to send with the message.".to_string()),
+        },
+    );
+    properties.insert(
+        "mode".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Set to 'nonblocking' to return immediately; defaults to 'blocking'.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "timeout_ms".to_string(),
+        JsonSchema::Number {
+            description: Some(
+                "Optional timeout in milliseconds to wait when blocking.".to_string(),
+            ),
+        },
+    );
+
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "subagent.reply".to_string(),
+        description: "Send a message to an existing subagent and optionally wait for the reply."
+            .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["subagent_id".to_string(), "message".to_string()]),
+            additional_properties: Some(false),
+        },
+    })
+}
+
+fn create_subagent_mailbox_tool() -> OpenAiTool {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "subagent_id".to_string(),
+        JsonSchema::String {
+            description: Some("Limit results to a specific subagent.".to_string()),
+        },
+    );
+    properties.insert(
+        "only_unread".to_string(),
+        JsonSchema::Boolean {
+            description: Some("If true, only return unread messages.".to_string()),
+        },
+    );
+    properties.insert(
+        "limit".to_string(),
+        JsonSchema::Number {
+            description: Some("Maximum number of messages to return.".to_string()),
+        },
+    );
+
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "subagent.mailbox".to_string(),
+        description: "List pending messages from subagents.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: None,
+            additional_properties: Some(false),
+        },
+    })
+}
+
+fn create_subagent_read_tool() -> OpenAiTool {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "mail_id".to_string(),
+        JsonSchema::String {
+            description: Some("Identifier of the mailbox item to read.".to_string()),
+        },
+    );
+    properties.insert(
+        "peek".to_string(),
+        JsonSchema::Boolean {
+            description: Some("If true, do not mark the message as read.".to_string()),
+        },
+    );
+
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "subagent.read".to_string(),
+        description: "Read the full contents of a subagent message.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["mail_id".to_string()]),
+            additional_properties: Some(false),
+        },
+    })
+}
+
+fn create_subagent_end_tool() -> OpenAiTool {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "subagent_id".to_string(),
+        JsonSchema::String {
+            description: Some("Identifier returned by subagent.open.".to_string()),
+        },
+    );
+    properties.insert(
+        "persist".to_string(),
+        JsonSchema::Boolean {
+            description: Some(
+                "If false, discard the subagent rollout transcript on shutdown.".to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "archive_to".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional directory to move the rollout transcript into.".to_string(),
+            ),
+        },
+    );
+
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "subagent.end".to_string(),
+        description: "Shut down a subagent and optionally archive its transcript.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["subagent_id".to_string()]),
             additional_properties: Some(false),
         },
     })
@@ -529,6 +757,15 @@ pub(crate) fn get_openai_tools(
     if config.include_view_image_tool {
         tools.push(create_view_image_tool());
     }
+
+    if config.include_subagent_tool {
+        tools.push(create_subagent_open_tool());
+        tools.push(create_subagent_reply_tool());
+        tools.push(create_subagent_mailbox_tool());
+        tools.push(create_subagent_read_tool());
+        tools.push(create_subagent_end_tool());
+    }
+
     if let Some(mcp_tools) = mcp_tools {
         // Ensure deterministic ordering to maximize prompt cache hits.
         let mut entries: Vec<(String, mcp_types::Tool)> = mcp_tools.into_iter().collect();
@@ -590,6 +827,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            include_subagent_tool: false,
             experimental_unified_exec_tool: true,
         });
         let tools = get_openai_tools(&config, Some(HashMap::new()));
@@ -597,6 +835,38 @@ mod tests {
         assert_eq_tool_names(
             &tools,
             &["unified_exec", "update_plan", "web_search", "view_image"],
+        );
+    }
+
+    #[test]
+    fn test_get_openai_tools_with_subagent() {
+        let model_family = find_family_for_model("codex-mini-latest")
+            .expect("codex-mini-latest should be a valid model family");
+        let config = ToolsConfig::new(&ToolsConfigParams {
+            model_family: &model_family,
+            include_plan_tool: true,
+            include_apply_patch_tool: false,
+            include_web_search_request: true,
+            use_streamable_shell_tool: false,
+            include_view_image_tool: true,
+            include_subagent_tool: true,
+            experimental_unified_exec_tool: true,
+        });
+        let tools = get_openai_tools(&config, Some(HashMap::new()));
+
+        assert_eq_tool_names(
+            &tools,
+            &[
+                "unified_exec",
+                "update_plan",
+                "web_search",
+                "view_image",
+                "subagent.open",
+                "subagent.reply",
+                "subagent.mailbox",
+                "subagent.read",
+                "subagent.end",
+            ],
         );
     }
 
@@ -610,6 +880,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            include_subagent_tool: false,
             experimental_unified_exec_tool: true,
         });
         let tools = get_openai_tools(&config, Some(HashMap::new()));
@@ -630,6 +901,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            include_subagent_tool: false,
             experimental_unified_exec_tool: true,
         });
         let tools = get_openai_tools(
@@ -734,6 +1006,7 @@ mod tests {
             include_web_search_request: false,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            include_subagent_tool: false,
             experimental_unified_exec_tool: true,
         });
 
@@ -810,6 +1083,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            include_subagent_tool: false,
             experimental_unified_exec_tool: true,
         });
 
@@ -871,6 +1145,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            include_subagent_tool: false,
             experimental_unified_exec_tool: true,
         });
 
@@ -927,6 +1202,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            include_subagent_tool: false,
             experimental_unified_exec_tool: true,
         });
 
@@ -986,6 +1262,7 @@ mod tests {
             include_web_search_request: true,
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
+            include_subagent_tool: false,
             experimental_unified_exec_tool: true,
         });
 

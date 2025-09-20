@@ -1,14 +1,21 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
 
 use crate::AuthManager;
 use crate::client_common::REVIEW_PROMPT;
+use crate::codex_conversation::CodexConversation;
+use crate::conversation_manager::ConversationManager;
+use crate::conversation_manager::NewConversation;
 use crate::event_mapping::map_response_item_to_event_messages;
 use crate::review_format::format_review_findings_block;
 use async_channel::Receiver;
@@ -31,6 +38,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use tokio::sync::Mutex;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
+use tokio::sync::TryAcquireError;
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tracing::debug;
@@ -122,6 +132,7 @@ use crate::user_notification::UserNotification;
 use crate::util::backoff;
 use codex_protocol::config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+use codex_protocol::config_types::SandboxMode;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -160,6 +171,10 @@ pub(crate) const MODEL_FORMAT_MAX_LINES: usize = 256; // lines
 pub(crate) const MODEL_FORMAT_HEAD_LINES: usize = MODEL_FORMAT_MAX_LINES / 2;
 pub(crate) const MODEL_FORMAT_TAIL_LINES: usize = MODEL_FORMAT_MAX_LINES - MODEL_FORMAT_HEAD_LINES; // 128
 pub(crate) const MODEL_FORMAT_HEAD_BYTES: usize = MODEL_FORMAT_MAX_BYTES / 2;
+
+const DEFAULT_MAX_SUBAGENT_DEPTH: u8 = 1;
+const DEFAULT_MAX_SUBAGENT_CONCURRENT: usize = 2;
+const SUBAGENT_MAIL_SUBJECT_MAX_LEN: usize = 80;
 
 impl Codex {
     /// Spawn a new [`Codex`] and initialize the session.
@@ -271,6 +286,8 @@ pub(crate) struct Session {
     session_manager: ExecSessionManager,
     unified_exec_manager: UnifiedExecSessionManager,
 
+    auth_manager: Arc<AuthManager>,
+
     /// External notifier command (will be passed as args to exec()). When
     /// `None` this feature is disabled.
     notify: Option<Vec<String>>,
@@ -283,6 +300,52 @@ pub(crate) struct Session {
     user_shell: shell::Shell,
     show_raw_agent_reasoning: bool,
     next_internal_sub_id: AtomicU64,
+
+    subagents: Mutex<HashMap<String, SubagentState>>,
+    mailbox: Mutex<Mailbox>,
+    subagent_slots: Arc<Semaphore>,
+    subagent_settings: SubagentSettings,
+    subagent_depth: u8,
+}
+
+struct SubagentState {
+    conversation: Arc<CodexConversation>,
+    conversation_id: ConversationId,
+    rollout_path: PathBuf,
+    description: String,
+    created_at: Instant,
+    last_active: Instant,
+    turns_completed: usize,
+    running: bool,
+    max_turns: Option<usize>,
+    max_runtime: Option<Duration>,
+    permit: OwnedSemaphorePermit,
+}
+
+#[derive(Default)]
+struct Mailbox {
+    next_id: u64,
+    order: VecDeque<String>,
+    items: HashMap<String, MailItem>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+struct MailItem {
+    id: String,
+    subagent_id: String,
+    subject: String,
+    body: String,
+    token_usage: Option<TokenUsage>,
+    timestamp: SystemTime,
+    unread: bool,
+    turn_index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SubagentSettings {
+    max_depth: u8,
+    max_concurrent: usize,
 }
 
 /// The context needed for a single turn of the conversation.
@@ -461,6 +524,7 @@ impl Session {
                 include_web_search_request: config.tools_web_search_request,
                 use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
                 include_view_image_tool: config.include_view_image_tool,
+                include_subagent_tool: config.include_subagent_tool,
                 experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
             }),
             user_instructions,
@@ -477,6 +541,7 @@ impl Session {
             mcp_connection_manager,
             session_manager: ExecSessionManager::default(),
             unified_exec_manager: UnifiedExecSessionManager::default(),
+            auth_manager,
             notify,
             state: Mutex::new(state),
             rollout: Mutex::new(Some(rollout_recorder)),
@@ -484,6 +549,14 @@ impl Session {
             user_shell: default_shell,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             next_internal_sub_id: AtomicU64::new(0),
+            subagents: Mutex::new(HashMap::new()),
+            mailbox: Mutex::new(Mailbox::default()),
+            subagent_slots: Arc::new(Semaphore::new(DEFAULT_MAX_SUBAGENT_CONCURRENT)),
+            subagent_settings: SubagentSettings {
+                max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
+                max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
+            },
+            subagent_depth: 0,
         });
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
@@ -518,6 +591,134 @@ impl Session {
             current_task.abort(TurnAbortReason::Replaced);
         }
         state.current_task = Some(task);
+    }
+
+    async fn open_subagent(
+        &self,
+        turn_context: &TurnContext,
+        args: SubagentOpenArgs,
+    ) -> Result<SubagentOpenResult, String> {
+        if self.subagent_depth >= self.subagent_settings.max_depth {
+            return Err("subagent depth limit reached".to_string());
+        }
+
+        let permit = match self.subagent_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::Closed) => {
+                return Err("subagent scheduler unavailable".to_string());
+            }
+            Err(TryAcquireError::NoPermits) => {
+                return Err("maximum concurrent subagents reached".to_string());
+            }
+        };
+
+        let SubagentOpenArgs {
+            goal,
+            system_prompt,
+            model,
+            approval_policy,
+            sandbox_mode,
+            cwd,
+            max_turns,
+            max_runtime_ms,
+        } = args;
+
+        if let Some(0) = max_turns {
+            return Err("max_turns must be greater than zero".to_string());
+        }
+        if let Some(0) = max_runtime_ms {
+            return Err("max_runtime_ms must be greater than zero".to_string());
+        }
+
+        let subagent_id = format!(
+            "subagent-{}",
+            self.next_internal_sub_id.fetch_add(1, Ordering::Relaxed)
+        );
+        let description = summarize_goal(&goal);
+
+        let mut child_config = (*turn_context.client.config()).clone();
+        child_config.include_subagent_tool = false;
+        child_config.base_instructions =
+            system_prompt.or_else(|| turn_context.base_instructions.clone());
+        child_config.approval_policy = approval_policy.unwrap_or(turn_context.approval_policy);
+        // Honor explicit sandbox_mode requests for the subagent. In particular,
+        // map WorkspaceWrite to a concrete workspace‑write policy rather than
+        // inheriting the parent's policy. This ensures callers can request
+        // write access for the child even when the parent is currently running
+        // in read‑only mode.
+        child_config.sandbox_policy = match sandbox_mode {
+            Some(SandboxMode::DangerFullAccess) => SandboxPolicy::DangerFullAccess,
+            Some(SandboxMode::ReadOnly) => SandboxPolicy::new_read_only_policy(),
+            Some(SandboxMode::WorkspaceWrite) => SandboxPolicy::new_workspace_write_policy(),
+            None => turn_context.sandbox_policy.clone(),
+        };
+
+        if let Some(model) = model {
+            child_config.model = model.clone();
+            if let Some(model_family) = find_family_for_model(&model) {
+                child_config.model_family = model_family.clone();
+                if let Some(info) = get_model_info(&model_family) {
+                    child_config.model_context_window = Some(info.context_window);
+                    child_config.model_max_output_tokens = Some(info.max_output_tokens);
+                    child_config.model_auto_compact_token_limit = info.auto_compact_token_limit;
+                }
+            }
+        }
+
+        let resolved_cwd = match cwd {
+            Some(path) => {
+                let candidate = PathBuf::from(path);
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    turn_context.cwd.join(candidate)
+                }
+            }
+            None => turn_context.cwd.clone(),
+        };
+        child_config.cwd = resolved_cwd;
+
+        let max_runtime = max_runtime_ms.map(Duration::from_millis);
+
+        let manager = ConversationManager::new(Arc::clone(&self.auth_manager));
+        let new_conversation = manager
+            .new_conversation(child_config)
+            .await
+            .map_err(|e| format!("failed to start subagent: {e}"))?;
+
+        let NewConversation {
+            conversation_id,
+            conversation,
+            session_configured,
+        } = new_conversation;
+
+        let rollout_path = session_configured.rollout_path.clone();
+
+        let mut subagents = self.subagents.lock().await;
+        subagents.insert(
+            subagent_id.clone(),
+            SubagentState {
+                conversation,
+                conversation_id,
+                rollout_path: rollout_path.clone(),
+                description: description.clone(),
+                created_at: Instant::now(),
+                last_active: Instant::now(),
+                turns_completed: 0,
+                running: false,
+                max_turns,
+                max_runtime,
+                permit,
+            },
+        );
+        drop(subagents);
+
+        Ok(SubagentOpenResult {
+            subagent_id,
+            conversation_id,
+            rollout_path,
+            description,
+        })
     }
 
     pub async fn remove_task(&self, sub_id: &str) {
@@ -1240,6 +1441,7 @@ async fn submission_loop(
                     include_web_search_request: config.tools_web_search_request,
                     use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
                     include_view_image_tool: config.include_view_image_tool,
+                    include_subagent_tool: config.include_subagent_tool,
                     experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
                 });
 
@@ -1327,6 +1529,7 @@ async fn submission_loop(
                             use_streamable_shell_tool: config
                                 .use_experimental_streamable_shell_tool,
                             include_view_image_tool: config.include_view_image_tool,
+                            include_subagent_tool: config.include_subagent_tool,
                             experimental_unified_exec_tool: config
                                 .use_experimental_unified_exec_tool,
                         }),
@@ -1552,6 +1755,7 @@ async fn spawn_review_thread(
         include_web_search_request: false,
         use_streamable_shell_tool: false,
         include_view_image_tool: false,
+        include_subagent_tool: false,
         experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
     });
 
@@ -2607,6 +2811,37 @@ async fn handle_custom_tool_call(
 ) -> ResponseInputItem {
     info!("CustomToolCall: {name} {input}");
     match name.as_str() {
+        "subagent.open" => {
+            let args = match serde_json::from_str::<SubagentOpenArgs>(&input) {
+                Ok(args) => args,
+                Err(err) => {
+                    return ResponseInputItem::CustomToolCallOutput {
+                        call_id,
+                        output: serde_json::json!({
+                            "error": format!("failed to parse subagent.open arguments: {err}")
+                        })
+                        .to_string(),
+                    };
+                }
+            };
+
+            match sess.open_subagent(turn_context, args).await {
+                Ok(result) => ResponseInputItem::CustomToolCallOutput {
+                    call_id,
+                    output: serde_json::json!({
+                        "subagent_id": result.subagent_id,
+                        "conversation_id": result.conversation_id,
+                        "rollout_path": result.rollout_path,
+                        "description": result.description,
+                    })
+                    .to_string(),
+                },
+                Err(err) => ResponseInputItem::CustomToolCallOutput {
+                    call_id,
+                    output: serde_json::json!({ "error": err }).to_string(),
+                },
+            }
+        }
         "apply_patch" => {
             let exec_params = ExecParams {
                 command: vec!["apply_patch".to_string(), input.clone()],
@@ -2648,6 +2883,32 @@ async fn handle_custom_tool_call(
     }
 }
 
+#[derive(Deserialize)]
+struct SubagentOpenArgs {
+    goal: String,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    approval_policy: Option<AskForApproval>,
+    #[serde(default)]
+    sandbox_mode: Option<SandboxMode>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    max_turns: Option<usize>,
+    #[serde(default)]
+    max_runtime_ms: Option<u64>,
+}
+
+struct SubagentOpenResult {
+    subagent_id: String,
+    conversation_id: ConversationId,
+    rollout_path: PathBuf,
+    description: String,
+}
+
 fn to_exec_params(params: ShellToolCallParams, turn_context: &TurnContext) -> ExecParams {
     ExecParams {
         command: params.command,
@@ -2679,6 +2940,22 @@ fn parse_container_exec_arguments(
             Err(Box::new(output))
         }
     }
+}
+
+fn summarize_goal(goal: &str) -> String {
+    let trimmed = goal.trim();
+    if trimmed.is_empty() {
+        return "subagent task".to_string();
+    }
+
+    let mut summary: String = trimmed
+        .chars()
+        .take(SUBAGENT_MAIL_SUBJECT_MAX_LEN)
+        .collect();
+    if trimmed.chars().count() > SUBAGENT_MAIL_SUBJECT_MAX_LEN {
+        summary.push('…');
+    }
+    summary
 }
 
 pub struct ExecInvokeArgs<'a> {
@@ -3607,6 +3884,7 @@ mod tests {
             include_web_search_request: config.tools_web_search_request,
             use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
             include_view_image_tool: config.include_view_image_tool,
+            include_subagent_tool: config.include_subagent_tool,
             experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
         });
         let turn_context = TurnContext {
@@ -3626,6 +3904,7 @@ mod tests {
             mcp_connection_manager: McpConnectionManager::default(),
             session_manager: ExecSessionManager::default(),
             unified_exec_manager: UnifiedExecSessionManager::default(),
+            auth_manager: crate::AuthManager::from_auth_for_testing(crate::CodexAuth::from_api_key("dummy")),
             notify: None,
             rollout: Mutex::new(None),
             state: Mutex::new(State {
@@ -3636,6 +3915,14 @@ mod tests {
             user_shell: shell::Shell::Unknown,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             next_internal_sub_id: AtomicU64::new(0),
+            subagents: Mutex::new(HashMap::new()),
+            mailbox: Mutex::new(Mailbox::default()),
+            subagent_slots: Arc::new(Semaphore::new(DEFAULT_MAX_SUBAGENT_CONCURRENT)),
+            subagent_settings: SubagentSettings {
+                max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
+                max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
+            },
+            subagent_depth: 0,
         };
         (session, turn_context)
     }
