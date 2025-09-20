@@ -15,6 +15,7 @@ pub enum SlashCommand {
     Model,
     Approvals,
     Review,
+    ReviewBranch,
     New,
     Init,
     Compact,
@@ -36,6 +37,7 @@ impl SlashCommand {
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
+            SlashCommand::ReviewBranch => "review changes on current branch vs base branch",
             SlashCommand::Quit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
@@ -64,6 +66,7 @@ impl SlashCommand {
             | SlashCommand::Model
             | SlashCommand::Approvals
             | SlashCommand::Review
+            | SlashCommand::ReviewBranch
             | SlashCommand::Logout => false,
             SlashCommand::Diff
             | SlashCommand::Mention

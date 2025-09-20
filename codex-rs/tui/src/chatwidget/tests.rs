@@ -6,6 +6,7 @@ use codex_core::CodexAuth;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
+use codex_core::config_types::Notifications as TuiNotifications;
 use codex_core::plan_tool::PlanItemArg;
 use codex_core::plan_tool::StepStatus;
 use codex_core::plan_tool::UpdatePlanArgs;
@@ -285,6 +286,7 @@ async fn helpers_are_available_and_do_not_panic() {
         initial_images: Vec::new(),
         enhanced_keys_supported: false,
         auth_manager,
+        tui_notifications: TuiNotifications::Enabled(false),
     };
     let mut w = ChatWidget::new(init, conversation_manager);
     // Basic construction sanity.
@@ -333,6 +335,9 @@ fn make_chatwidget_manual() -> (
         suppress_session_configured_redraw: false,
         pending_notification: None,
         is_review_mode: false,
+        suppress_next_review_render: false,
+        review_orchestrator: None,
+        tui_notifications: TuiNotifications::Enabled(false),
     };
     (widget, rx, op_rx)
 }

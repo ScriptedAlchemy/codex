@@ -9,7 +9,6 @@ use crate::config_types::Tui;
 use crate::config_types::UriBasedFileOpener;
 use crate::git_info::resolve_root_git_project_for_trust;
 use crate::model_family::ModelFamily;
-use crate::model_family::derive_default_model_family;
 use crate::model_family::find_family_for_model;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::built_in_model_providers;

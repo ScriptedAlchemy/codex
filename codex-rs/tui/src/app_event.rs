@@ -3,6 +3,7 @@ use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
 
 use crate::history_cell::HistoryCell;
+use crate::review_branch::orchestrator::Orchestrator;
 
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
@@ -65,4 +66,7 @@ pub(crate) enum AppEvent {
 
     /// Forwarded conversation history snapshot from the current conversation.
     ConversationHistory(ConversationPathResponseEvent),
+
+    /// Start /review-branch orchestrated batching with a prepared orchestrator.
+    StartReviewBranchOrchestrator(Orchestrator),
 }

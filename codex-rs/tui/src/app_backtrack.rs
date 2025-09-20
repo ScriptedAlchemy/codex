@@ -6,6 +6,9 @@ use crate::history_cell::UserHistoryCell;
 use crate::pager_overlay::Overlay;
 use crate::tui;
 use crate::tui::TuiEvent;
+use codex_core::config::find_codex_home;
+use codex_core::config::load_config_as_toml_with_cli_overrides;
+use codex_core::config_types::Notifications as TuiNotifications;
 use codex_core::protocol::ConversationPathResponseEvent;
 use codex_protocol::mcp_protocol::ConversationId;
 use color_eyre::eyre::Result;
@@ -337,6 +340,8 @@ impl App {
             initial_images: Vec::new(),
             enhanced_keys_supported: self.enhanced_keys_supported,
             auth_manager: self.auth_manager.clone(),
+            tui_notifications: detect_tui_notifications()
+                .unwrap_or(TuiNotifications::Enabled(false)),
         };
         self.chat_widget =
             crate::chatwidget::ChatWidget::new_from_existing(init, conv, session_configured);
@@ -353,6 +358,12 @@ impl App {
     fn trim_transcript_for_backtrack(&mut self, nth_user_message: usize) {
         trim_transcript_cells_to_nth_user(&mut self.transcript_cells, nth_user_message);
     }
+}
+
+fn detect_tui_notifications() -> Option<TuiNotifications> {
+    let codex_home = find_codex_home().ok()?;
+    let cfg = load_config_as_toml_with_cli_overrides(&codex_home, vec![]).ok()?;
+    cfg.tui.map(|t| t.notifications)
 }
 
 fn trim_transcript_cells_to_nth_user(

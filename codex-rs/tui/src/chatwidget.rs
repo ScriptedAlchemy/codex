@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_core::config::Config;
-use codex_core::config_types::Notifications;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -76,6 +75,15 @@ use crate::slash_command::SlashCommand;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 // streaming internals are provided by crate::streaming and crate::markdown_stream
+use crate::git_branch_base::resolve_base_with_hint;
+use crate::git_branch_summary::branch_shortstat;
+use crate::git_branch_summary::parse_shortstat_line;
+use codex_core::config_types::Notifications as TuiNotifications;
+const REVIEW_BRANCH_BATCH_PROMPT_TMPL: &str =
+    include_str!("./prompt_for_review_branch_batch_command.md");
+const REVIEW_BRANCH_PROMPT_TMPL: &str = include_str!("./prompt_for_review_branch_command.md");
+const REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL: &str =
+    include_str!("./prompt_for_review_branch_consolidation.md");
 use crate::user_approval_widget::ApprovalRequest;
 mod interrupts;
 use self::interrupts::InterruptManager;
@@ -88,7 +96,6 @@ use crate::streaming::controller::AppEventHistorySink;
 use crate::streaming::controller::StreamController;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
-use codex_common::model_presets::ModelPreset;
 use codex_common::model_presets::builtin_model_presets;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
@@ -112,6 +119,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) initial_images: Vec<PathBuf>,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) tui_notifications: TuiNotifications,
 }
 
 pub(crate) struct ChatWidget {
@@ -147,6 +155,12 @@ pub(crate) struct ChatWidget {
     pending_notification: Option<Notification>,
     // Simple review mode flag; used to adjust layout and banners.
     is_review_mode: bool,
+    // Orchestrator for /review-branch multi-batch final-pass flow
+    review_orchestrator: Option<crate::review_branch::orchestrator::Orchestrator>,
+    // Suppress rendering of intermediate batch results in orchestrated /review-branch.
+    suppress_next_review_render: bool,
+    // Cached TUI notifications policy (derived from config.toml at startup)
+    tui_notifications: TuiNotifications,
 }
 
 struct UserMessage {
@@ -172,6 +186,15 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
 }
 
 impl ChatWidget {
+    pub(crate) fn set_review_orchestrator(
+        &mut self,
+        orc: crate::review_branch::orchestrator::Orchestrator,
+    ) {
+        self.review_orchestrator = Some(orc);
+        if let Some(orc) = self.review_orchestrator.as_mut() {
+            orc.start();
+        }
+    }
     fn flush_answer_stream_with_separator(&mut self) {
         let sink = AppEventHistorySink(self.app_event_tx.clone());
         let _ = self.stream.finalize(true, &sink);
@@ -673,6 +696,7 @@ impl ChatWidget {
             initial_images,
             enhanced_keys_supported,
             auth_manager,
+            tui_notifications,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -711,6 +735,9 @@ impl ChatWidget {
             suppress_session_configured_redraw: false,
             pending_notification: None,
             is_review_mode: false,
+            review_orchestrator: None,
+            suppress_next_review_render: false,
+            tui_notifications,
         }
     }
 
@@ -728,6 +755,7 @@ impl ChatWidget {
             initial_images,
             enhanced_keys_supported,
             auth_manager,
+            tui_notifications,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -768,6 +796,9 @@ impl ChatWidget {
             suppress_session_configured_redraw: true,
             pending_notification: None,
             is_review_mode: false,
+            review_orchestrator: None,
+            suppress_next_review_render: false,
+            tui_notifications,
         }
     }
 
@@ -889,6 +920,79 @@ impl ChatWidget {
                         prompt: "review current changes".to_string(),
                         user_facing_hint: "current changes".to_string(),
                     },
+                });
+            }
+            SlashCommand::ReviewBranch => {
+                // Show a quick status line and resolve base asynchronously.
+                self.add_to_history(history_cell::new_review_status_line(
+                    "Computing base branch for /review-branch…".to_string(),
+                ));
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    match resolve_base_with_hint().await {
+                        Ok(rb) => {
+                            let base = rb.base.clone();
+                            let reason = rb.reason.clone();
+                            // Optional: show shortstat to set expectations.
+                            let mut size_hint_line = String::new();
+                            if let Ok(Some(stat)) = branch_shortstat(&base).await {
+                                tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                    history_cell::new_review_status_line(format!(
+                                        "Branch changes vs {base}: {stat} ({reason})"
+                                    )),
+                                )));
+                                if let Some((files, added, deleted)) = parse_shortstat_line(&stat) {
+                                    size_hint_line = format!(
+                                        "Size hint: ~{files} files changed, +{added}/-{deleted} lines."
+                                    );
+                                    // If large, use orchestrated multi-batch flow.
+                                    if (files > 50 || (added + deleted) > 5000)
+                                        && let Ok(orc) =
+                                            crate::review_branch::orchestrator::Orchestrator::new(
+                                                tx.clone(),
+                                                base.clone(),
+                                                reason.clone(),
+                                                25,   // small files cap
+                                                5,    // large files cap
+                                                400,  // large file threshold (changed lines)
+                                                5000, // max lines per batch
+                                                REVIEW_BRANCH_BATCH_PROMPT_TMPL,
+                                                REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL,
+                                            )
+                                            .await
+                                        && orc.has_batches()
+                                    {
+                                        tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                            history_cell::new_review_status_line(format!(
+                                                "Planning {} batch(es) for /review-branch…",
+                                                orc.batches.len()
+                                            )),
+                                        )));
+                                        tx.send(AppEvent::StartReviewBranchOrchestrator(orc));
+                                        return;
+                                    }
+                                }
+                            }
+
+                            let prompt = REVIEW_BRANCH_PROMPT_TMPL
+                                .replace("{base}", &base)
+                                .replace("{size_hint_line}", &size_hint_line);
+                            let hint = format!("branch vs {base} ({reason})");
+                            tx.send(AppEvent::CodexOp(Op::Review {
+                                review_request: ReviewRequest {
+                                    prompt,
+                                    user_facing_hint: hint,
+                                },
+                            }));
+                        }
+                        Err(e) => {
+                            tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                history_cell::new_error_event(format!(
+                                    "/review-branch: failed to determine base branch: {e}"
+                                )),
+                            )));
+                        }
+                    }
                 });
             }
             SlashCommand::Model => {
@@ -1164,12 +1268,26 @@ impl ChatWidget {
     fn on_entered_review_mode(&mut self, review: ReviewRequest) {
         // Enter review mode and emit a concise banner
         self.is_review_mode = true;
+        // Detect orchestrated batch turns to suppress intermediate rendering.
+        self.suppress_next_review_render = review.user_facing_hint.starts_with("batch ");
         let banner = format!(">> Code review started: {} <<", review.user_facing_hint);
         self.add_to_history(history_cell::new_review_status_line(banner));
         self.request_redraw();
     }
 
     fn on_exited_review_mode(&mut self, review: ExitedReviewModeEvent) {
+        // Orchestrated flow handling: accumulate batch results or finalize consolidation.
+        if let Some(orc) = self.review_orchestrator.as_mut() {
+            if self.suppress_next_review_render {
+                self.suppress_next_review_render = false;
+                orc.on_batch_result(&review.review_output.unwrap_or_default());
+                return; // Skip rendering intermediate results
+            } else {
+                // Final consolidated result (or empty): let normal rendering happen, but mark orchestrator done.
+                orc.on_consolidation_result(&review.review_output.clone().unwrap_or_default());
+                // Fall through to render below
+            }
+        }
         // Leave review mode; if output is present, flush pending stream + show results.
         if let Some(output) = review.review_output {
             self.flush_answer_stream_with_separator();
@@ -1230,11 +1348,19 @@ impl ChatWidget {
     }
 
     fn notify(&mut self, notification: Notification) {
-        if !notification.allowed_for(&self.config.tui_notifications) {
-            return;
+        if self.notification_allowed(&notification) {
+            self.pending_notification = Some(notification);
+            self.request_redraw();
         }
-        self.pending_notification = Some(notification);
-        self.request_redraw();
+    }
+
+    fn notification_allowed(&self, notification: &Notification) -> bool {
+        let kind = notification.kind_str();
+        match &self.tui_notifications {
+            TuiNotifications::Enabled(true) => true,
+            TuiNotifications::Enabled(false) => false,
+            TuiNotifications::Custom(list) => list.iter().any(|v| v == kind),
+        }
     }
 
     pub(crate) fn maybe_post_pending_notification(&mut self, tui: &mut crate::tui::Tui) {
@@ -1301,8 +1427,8 @@ impl ChatWidget {
     pub(crate) fn open_model_popup(&mut self) {
         let current_model = self.config.model.clone();
         let current_effort = self.config.model_reasoning_effort;
-        let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
-        let presets: Vec<ModelPreset> = builtin_model_presets(auth_mode);
+        let _auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
+        let presets = builtin_model_presets();
 
         let mut items: Vec<SelectionItem> = Vec::new();
         for preset in presets.iter() {
@@ -1562,6 +1688,13 @@ enum Notification {
 }
 
 impl Notification {
+    fn kind_str(&self) -> &'static str {
+        match self {
+            Notification::AgentTurnComplete { .. } => "agent-turn-complete",
+            Notification::ExecApprovalRequested { .. }
+            | Notification::EditApprovalRequested { .. } => "approval-requested",
+        }
+    }
     fn display(&self) -> String {
         match self {
             Notification::AgentTurnComplete { response } => {
@@ -1582,21 +1715,6 @@ impl Notification {
                     }
                 )
             }
-        }
-    }
-
-    fn type_name(&self) -> &str {
-        match self {
-            Notification::AgentTurnComplete { .. } => "agent-turn-complete",
-            Notification::ExecApprovalRequested { .. }
-            | Notification::EditApprovalRequested { .. } => "approval-requested",
-        }
-    }
-
-    fn allowed_for(&self, settings: &Notifications) -> bool {
-        match settings {
-            Notifications::Enabled(enabled) => *enabled,
-            Notifications::Custom(allowed) => allowed.iter().any(|a| a == self.type_name()),
         }
     }
 

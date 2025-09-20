@@ -12,7 +12,10 @@ use codex_ansi_escape::ansi_escape_line;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::config::Config;
+use codex_core::config::find_codex_home;
+use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::config::persist_model_selection;
+use codex_core::config_types::Notifications as TuiNotifications;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::TokenUsage;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
@@ -96,6 +99,8 @@ impl App {
                     initial_images: initial_images.clone(),
                     enhanced_keys_supported,
                     auth_manager: auth_manager.clone(),
+                    tui_notifications: detect_tui_notifications()
+                        .unwrap_or(TuiNotifications::Enabled(false)),
                 };
                 ChatWidget::new(init, conversation_manager.clone())
             }
@@ -118,6 +123,8 @@ impl App {
                     initial_images: initial_images.clone(),
                     enhanced_keys_supported,
                     auth_manager: auth_manager.clone(),
+                    tui_notifications: detect_tui_notifications()
+                        .unwrap_or(TuiNotifications::Enabled(false)),
                 };
                 ChatWidget::new_from_existing(
                     init,
@@ -220,6 +227,8 @@ impl App {
                     initial_images: Vec::new(),
                     enhanced_keys_supported: self.enhanced_keys_supported,
                     auth_manager: self.auth_manager.clone(),
+                    tui_notifications: detect_tui_notifications()
+                        .unwrap_or(TuiNotifications::Enabled(false)),
                 };
                 self.chat_widget = ChatWidget::new(init, self.server.clone());
                 tui.frame_requester().schedule_frame();
@@ -277,6 +286,9 @@ impl App {
             }
             AppEvent::ConversationHistory(ev) => {
                 self.on_conversation_history_for_backtrack(tui, ev).await?;
+            }
+            AppEvent::StartReviewBranchOrchestrator(orc) => {
+                self.chat_widget.set_review_orchestrator(orc);
             }
             AppEvent::ExitRequest => {
                 return Ok(false);
@@ -425,6 +437,12 @@ impl App {
             }
         };
     }
+}
+
+fn detect_tui_notifications() -> Option<TuiNotifications> {
+    let codex_home = find_codex_home().ok()?;
+    let cfg = load_config_as_toml_with_cli_overrides(&codex_home, vec![]).ok()?;
+    cfg.tui.map(|t| t.notifications)
 }
 
 #[cfg(test)]
