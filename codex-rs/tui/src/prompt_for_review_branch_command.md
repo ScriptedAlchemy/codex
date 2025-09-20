@@ -10,11 +10,16 @@ Procedure:
 - Prioritize in this order: security‑sensitive I/O/auth/crypto; public APIs and error handling; core logic; migrations/scripts/build logic.
 - If you cannot cover everything in one pass, review in batches and present the highest‑impact findings first.
 
-Scope filters (skip "junk" files unless there is a direct, non‑speculative impact):
+Scope filters (skip "junk" files unless there is a direct, non‑speculative impact — and avoid fetching diffs for them):
 - Package manager lockfiles (e.g., `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`).
 - Generated code, vendored bundles, and minified assets.
 - Large binary assets (images, fonts, media) and formatting‑only changes.
 - Pure docs/changelogs unless they create a correctness or security risk.
+If such files are present, omit them; only fetch a minimal hunk if you have a specific, high‑confidence reason they affect correctness/security.
+
+Context exploration (allowed when needed):
+- If assessing a change requires peeking at a related file (dependency, included config, or caller/callee), you MAY fetch a minimal hunk or a small slice from base vs HEAD to verify the conclusion.
+- Keep it narrowly targeted (specific functions/lines) and avoid broad scans; only include enough context to confirm or fix the issue.
 
 Constraints:
 - Do not paste full diffs; cite exact `file:line` ranges.

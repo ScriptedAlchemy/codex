@@ -58,6 +58,8 @@ pub(crate) async fn collect_branch_numstat(base: &str) -> io::Result<Vec<Numstat
     }
     // Filter out low-value/junk paths to avoid reviewing lockfiles, docs-only, binaries, etc.
     rows.retain(|r| !is_junk_path(&r.path));
+    // Drop entries with no line changes (pure renames/mode changes) to avoid empty batches.
+    rows.retain(|r| r.added + r.deleted > 0);
     Ok(rows)
 }
 
@@ -148,19 +150,6 @@ fn is_junk_path(path: &str) -> bool {
         return true;
     }
 
-    // Docs and changelogs
-    const DOC_EXTS: &[&str] = &[".md", ".mdx", ".rst", ".adoc"]; // keep .txt for now
-    if DOC_EXTS.iter().any(|ext| p.ends_with(ext)) {
-        return true;
-    }
-    const DOC_FILES: &[&str] = &["changelog", "changes", "license", "copying", "readme"];
-    if DOC_FILES
-        .iter()
-        .any(|name| p.ends_with(name) || p.contains(&format!("/{name}")))
-    {
-        return true;
-    }
-
     // Minified bundles and source maps
     if p.ends_with(".min.js") || p.ends_with(".map") {
         return true;
@@ -176,4 +165,98 @@ fn is_junk_path(path: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn junk_filters_lockfiles_and_vendor_but_not_docs() {
+        assert!(is_junk_path("package-lock.json"));
+        assert!(is_junk_path("pnpm-lock.yaml"));
+        assert!(is_junk_path("vendor/lib.rs"));
+        assert!(is_junk_path("node_modules/react/index.js"));
+        assert!(is_junk_path("dist/app.min.js"));
+        assert!(is_junk_path("assets/logo.svg"));
+
+        // Docs should not be hard-filtered
+        assert!(!is_junk_path("README.md"));
+        assert!(!is_junk_path("docs/guide.mdx"));
+    }
+
+    #[test]
+    fn chunk_small_files_into_25_then_remainder() {
+        let mut rows = Vec::new();
+        for i in 0..30 {
+            rows.push(NumstatRow {
+                path: format!("src/file_{i}.rs"),
+                added: 5,
+                deleted: 5,
+            });
+        }
+        let limits = ChunkLimits {
+            small_files_cap: 25,
+            large_files_cap: 5,
+            large_file_threshold_lines: 400,
+            max_lines: 5000,
+        };
+        let batches = score_and_chunk(rows, limits);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].files.len(), 25);
+        assert_eq!(batches[1].files.len(), 5);
+    }
+
+    #[test]
+    fn chunk_with_large_file_caps_batch_at_5() {
+        let mut rows = Vec::new();
+        // One large file (1000 lines changed)
+        rows.push(NumstatRow {
+            path: "src/huge.rs".to_string(),
+            added: 800,
+            deleted: 200,
+        });
+        // Ten small files
+        for i in 0..10 {
+            rows.push(NumstatRow {
+                path: format!("src/small_{i}.rs"),
+                added: 10,
+                deleted: 5,
+            });
+        }
+        let limits = ChunkLimits {
+            small_files_cap: 25,
+            large_files_cap: 5,
+            large_file_threshold_lines: 400,
+            max_lines: 5000,
+        };
+        let batches = score_and_chunk(rows, limits);
+        assert!(batches.len() >= 2);
+        // First batch must be capped at 5 files due to the large file presence.
+        assert_eq!(batches[0].files.len(), 5);
+    }
+    #[test]
+    fn retain_zero_change_rows_for_submodules_and_binaries() {
+        let rows = vec![
+            NumstatRow {
+                path: "submodules/libA".into(),
+                added: 0,
+                deleted: 0,
+            },
+            NumstatRow {
+                path: "src/real_change.ts".into(),
+                added: 3,
+                deleted: 2,
+            },
+        ];
+        let limits = ChunkLimits {
+            small_files_cap: 25,
+            large_files_cap: 5,
+            large_file_threshold_lines: 400,
+            max_lines: 5000,
+        };
+        let batches = score_and_chunk(rows, limits);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].files.len(), 2);
+    }
 }

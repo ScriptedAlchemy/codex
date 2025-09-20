@@ -31,14 +31,14 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
             if rev_parse_verify(&remote_ref).await? {
                 return Ok(ResolvedBase {
                     base: remote_ref,
-                    reason: "PR base".to_string(),
+                    reason: format!("PR base: {}", base_ref),
                 });
             }
         }
         if rev_parse_verify(&base_ref).await? {
             return Ok(ResolvedBase {
-                base: base_ref,
-                reason: "PR base".to_string(),
+                base: base_ref.clone(),
+                reason: format!("PR base: {}", base_ref),
             });
         }
     }
@@ -49,33 +49,29 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
         if let Some(cur) = current.as_deref() {
             let tail = up.split('/').last().unwrap_or("");
             if tail != cur {
-                return Ok(ResolvedBase {
-                    base: up,
-                    reason: "upstream".to_string(),
-                });
+                let reason = format!("upstream: {}", tail);
+                return Ok(ResolvedBase { base: up, reason });
             }
         } else {
-            return Ok(ResolvedBase {
-                base: up,
-                reason: "upstream".to_string(),
-            });
+            let tail = up.rsplit('/').next().unwrap_or("");
+            let reason = format!("upstream: {}", tail);
+            return Ok(ResolvedBase { base: up, reason });
         }
     }
 
     // 2) Remote default HEAD, then common remote names.
     if let Some(remote) = default_remote().await? {
         if let Some(sym) = remote_head_symbolic_ref(&remote).await? {
-            return Ok(ResolvedBase {
-                base: sym,
-                reason: "remote default".to_string(),
-            });
+            let tail = sym.rsplit('/').next().unwrap_or("");
+            let reason = format!("remote default: {}", tail);
+            return Ok(ResolvedBase { base: sym, reason });
         }
         for name in ["main", "master", "trunk", "develop"] {
             let candidate = format!("{remote}/{name}");
             if rev_parse_verify(&candidate).await? {
                 return Ok(ResolvedBase {
                     base: candidate,
-                    reason: "remote fallback".to_string(),
+                    reason: format!("remote fallback: {}", name),
                 });
             }
         }
@@ -86,7 +82,7 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
         if rev_parse_verify(name).await? {
             return Ok(ResolvedBase {
                 base: name.to_string(),
-                reason: "local fallback".to_string(),
+                reason: format!("local fallback: {}", name),
             });
         }
     }
