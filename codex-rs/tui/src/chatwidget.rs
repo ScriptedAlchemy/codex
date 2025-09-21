@@ -952,10 +952,12 @@ impl ChatWidget {
                                                 tx.clone(),
                                                 base.clone(),
                                                 reason.clone(),
-                                                25,   // small files cap
-                                                5,    // large files cap
-                                                400,  // large file threshold (changed lines)
-                                                5000, // max lines per batch
+                                                crate::review_branch::chunker::ChunkLimits {
+                                                    small_files_cap: 25,
+                                                    large_files_cap: 5,
+                                                    large_file_threshold_lines: 400,
+                                                    max_lines: 5000,
+                                                },
                                                 REVIEW_BRANCH_BATCH_PROMPT_TMPL,
                                                 REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL,
                                             )

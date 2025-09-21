@@ -35,20 +35,11 @@ impl Orchestrator {
         tx: AppEventSender,
         base: String,
         reason: String,
-        small_files_cap: usize,
-        large_files_cap: usize,
-        large_file_threshold_lines: usize,
-        max_lines: usize,
+        limits: ChunkLimits,
         batch_prompt_tmpl: &'static str,
         consolidation_prompt_tmpl: &'static str,
     ) -> anyhow::Result<Self> {
         let rows = collect_branch_numstat(&base).await.unwrap_or_default();
-        let limits = ChunkLimits {
-            small_files_cap,
-            large_files_cap,
-            large_file_threshold_lines,
-            max_lines,
-        };
         let batches = score_and_chunk(rows, limits);
         Ok(Self {
             tx,
@@ -61,10 +52,6 @@ impl Orchestrator {
             batch_prompt_tmpl,
             consolidation_prompt_tmpl,
         })
-    }
-
-    pub fn is_running(&self) -> bool {
-        self.stage != Stage::Done
     }
 
     pub fn has_batches(&self) -> bool {
@@ -157,69 +144,9 @@ impl Orchestrator {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app_event::AppEvent;
-    use crate::app_event_sender::AppEventSender;
-    use tokio::sync::mpsc::unbounded_channel;
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn start_emits_hint_with_reason_and_batch_status() {
-        // Prepare a single tiny batch
-        let batch = Batch {
-            files: vec![crate::review_branch::chunker::NumstatRow {
-                path: "src/lib.rs".into(),
-                added: 10,
-                deleted: 0,
-            }],
-            total_added: 10,
-            total_deleted: 0,
-        };
-        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let mut orc = Orchestrator {
-            base: "origin/main".to_string(),
-            reason: "PR base: main".to_string(),
-            batches: vec![batch],
-            idx: 0,
-            acc: Vec::new(),
-            stage: Stage::Batching,
-            tx,
-            batch_prompt_tmpl: "{base} {batch_index}/{batch_total} {size_hint} {file_list}",
-            consolidation_prompt_tmpl: "{base} {stats} {clusters}",
-        };
-
-        orc.start();
-
-        // Expect a status InsertHistoryCell and a CodexOp Review with reason in hint
-        let mut saw_status = false;
-        let mut saw_review = false;
-        while let Ok(ev) = rx.try_recv() {
-            match ev {
-                AppEvent::InsertHistoryCell(_) => {
-                    saw_status = true;
-                }
-                AppEvent::CodexOp(codex_core::protocol::Op::Review { review_request }) => {
-                    assert!(review_request.user_facing_hint.contains("PR base: main"));
-                    assert!(review_request.user_facing_hint.contains("batch 1/1"));
-                    saw_review = true;
-                }
-                _ => {}
-            }
-        }
-        assert!(saw_status && saw_review);
-    }
-}
-
 /// Build a compact consolidation package to keep token size low.
 fn build_consolidation_package(findings: &[ReviewFinding]) -> (String, String) {
     // Very light clustering: group by file and overlapping ranges (<= 5 lines apart), similar titles (case-insensitive prefix match).
-    #[derive(Clone)]
-    struct Key<'a> {
-        path: &'a str,
-        start: u32,
-    }
     let mut items: Vec<&ReviewFinding> = findings.iter().collect();
     items.sort_by(|a, b| {
         a.code_location
@@ -283,4 +210,59 @@ fn build_consolidation_package(findings: &[ReviewFinding]) -> (String, String) {
         clusters.len()
     );
     (out, stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_event::AppEvent;
+    use crate::app_event_sender::AppEventSender;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn start_emits_hint_with_reason_and_batch_status() {
+        // Prepare a single tiny batch
+        let batch = Batch {
+            files: vec![crate::review_branch::chunker::NumstatRow {
+                path: "src/lib.rs".into(),
+                added: 10,
+                deleted: 0,
+            }],
+            total_added: 10,
+            total_deleted: 0,
+        };
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut orc = Orchestrator {
+            base: "origin/main".to_string(),
+            reason: "PR base: main".to_string(),
+            batches: vec![batch],
+            idx: 0,
+            acc: Vec::new(),
+            stage: Stage::Batching,
+            tx,
+            batch_prompt_tmpl: "{base} {batch_index}/{batch_total} {size_hint} {file_list}",
+            consolidation_prompt_tmpl: "{base} {stats} {clusters}",
+        };
+
+        orc.start();
+
+        // Expect a status InsertHistoryCell and a CodexOp Review with reason in hint
+        let mut saw_status = false;
+        let mut saw_review = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::InsertHistoryCell(_) => {
+                    saw_status = true;
+                }
+                AppEvent::CodexOp(codex_core::protocol::Op::Review { review_request }) => {
+                    assert!(review_request.user_facing_hint.contains("PR base: main"));
+                    assert!(review_request.user_facing_hint.contains("batch 1/1"));
+                    saw_review = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_status && saw_review);
+    }
 }

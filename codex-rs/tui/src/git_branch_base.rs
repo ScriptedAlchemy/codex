@@ -31,14 +31,14 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
             if rev_parse_verify(&remote_ref).await? {
                 return Ok(ResolvedBase {
                     base: remote_ref,
-                    reason: format!("PR base: {}", base_ref),
+                    reason: format!("PR base: {base_ref}"),
                 });
             }
         }
         if rev_parse_verify(&base_ref).await? {
             return Ok(ResolvedBase {
                 base: base_ref.clone(),
-                reason: format!("PR base: {}", base_ref),
+                reason: format!("PR base: {base_ref}"),
             });
         }
     }
@@ -47,14 +47,14 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
     let current = current_branch_name().await?;
     if let Some(up) = rev_parse_upstream().await? {
         if let Some(cur) = current.as_deref() {
-            let tail = up.split('/').last().unwrap_or("");
+            let tail = up.split('/').next_back().unwrap_or("");
             if tail != cur {
-                let reason = format!("upstream: {}", tail);
+                let reason = format!("upstream: {tail}");
                 return Ok(ResolvedBase { base: up, reason });
             }
         } else {
             let tail = up.rsplit('/').next().unwrap_or("");
-            let reason = format!("upstream: {}", tail);
+            let reason = format!("upstream: {tail}");
             return Ok(ResolvedBase { base: up, reason });
         }
     }
@@ -63,7 +63,7 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
     if let Some(remote) = default_remote().await? {
         if let Some(sym) = remote_head_symbolic_ref(&remote).await? {
             let tail = sym.rsplit('/').next().unwrap_or("");
-            let reason = format!("remote default: {}", tail);
+            let reason = format!("remote default: {tail}");
             return Ok(ResolvedBase { base: sym, reason });
         }
         for name in ["main", "master", "trunk", "develop"] {
@@ -71,7 +71,7 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
             if rev_parse_verify(&candidate).await? {
                 return Ok(ResolvedBase {
                     base: candidate,
-                    reason: format!("remote fallback: {}", name),
+                    reason: format!("remote fallback: {name}"),
                 });
             }
         }
@@ -82,7 +82,7 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
         if rev_parse_verify(name).await? {
             return Ok(ResolvedBase {
                 base: name.to_string(),
-                reason: format!("local fallback: {}", name),
+                reason: format!("local fallback: {name}"),
             });
         }
     }
@@ -90,10 +90,6 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
     Err(io::Error::other(
         "could not determine base branch; set an upstream with `git push -u`, open a PR, or create a local `main`/`master` branch",
     ))
-}
-
-pub(crate) async fn resolve_base() -> io::Result<String> {
-    Ok(resolve_base_with_hint().await?.base)
 }
 
 async fn inside_git_repo() -> io::Result<bool> {
