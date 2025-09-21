@@ -669,9 +669,23 @@ impl Session {
             None => turn_context.sandbox_policy.clone(),
         };
 
+        // Default subagents to the Codex (swiftfox) model line unless explicitly overridden.
+        // This keeps child conversations optimized for coding tasks even when the
+        // parent session is using a different model.
         if let Some(model) = model {
             child_config.model = model.clone();
             if let Some(model_family) = find_family_for_model(&model) {
+                child_config.model_family = model_family.clone();
+                if let Some(info) = get_model_info(&model_family) {
+                    child_config.model_context_window = Some(info.context_window);
+                    child_config.model_max_output_tokens = Some(info.max_output_tokens);
+                    child_config.model_auto_compact_token_limit = info.auto_compact_token_limit;
+                }
+            }
+        } else {
+            use crate::config::SWIFTFOX_MEDIUM_MODEL;
+            child_config.model = SWIFTFOX_MEDIUM_MODEL.to_string();
+            if let Some(model_family) = find_family_for_model(&child_config.model) {
                 child_config.model_family = model_family.clone();
                 if let Some(info) = get_model_info(&model_family) {
                     child_config.model_context_window = Some(info.context_window);
@@ -685,10 +699,9 @@ impl Session {
         // Deliver via user_instructions (not base instructions) to keep
         // model `instructions` stable as tested elsewhere.
         child_config.user_instructions = Some(match child_config.user_instructions.take() {
-            Some(existing) => format!(
-                "{existing}\n\n--- subagent-guide ---\n\n{}",
-                SUBAGENT_USER_GUIDE
-            ),
+            Some(existing) => {
+                format!("{existing}\n\n--- subagent-guide ---\n\n{SUBAGENT_USER_GUIDE}")
+            }
             None => SUBAGENT_USER_GUIDE.to_string(),
         });
 
@@ -3053,7 +3066,7 @@ async fn handle_custom_tool_call(
                     let _ = sess
                         .notify_background_event(
                             &sub_id,
-                            format!("Subagent {} ended", subagent_id_for_msg),
+                            format!("Subagent {subagent_id_for_msg} ended"),
                         )
                         .await;
                     ResponseInputItem::CustomToolCallOutput {

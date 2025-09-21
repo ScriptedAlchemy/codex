@@ -14,12 +14,13 @@ Instructions:
 - If two candidate issues are effectively the same, prefer the higher-confidence one.
 
 Static checks for this batch (run, don’t auto‑fix):
+- You MUST attempt to discover and run configured project linters/type checkers for the files in this batch. Begin by briefly listing which checks you will run (or why none are applicable), then run them.
 - Identify affected subprojects from the files in this batch and run the project’s checker/linter only for those parts.
   - Rust: `cargo clippy -p <crate> --tests --all-features` (no `--fix`) and/or `cargo check -p <crate>`.
   - JS/TS: `npm run -w <pkg> lint` and `npm run -w <pkg> typecheck`.
   - Python: `ruff`/`flake8` and `mypy` for the batch’s modules.
 - Record any errors/warnings overlapping this batch; convert substantive ones into findings (cite rule/lint), otherwise summarize under `overall_explanation`.
-- If a checker cannot run, note why and proceed.
+- If a checker cannot run, state exactly what you tried and why it could not run, then proceed.
 
 Skip low-value files unless there is a direct, non-speculative impact — and do not fetch diffs for them:
 - Lockfiles (e.g., `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`).

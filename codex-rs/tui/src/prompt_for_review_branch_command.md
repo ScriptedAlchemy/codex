@@ -11,12 +11,13 @@ Procedure:
 - If you cannot cover everything in one pass, review in batches and present the highest‑impact findings first.
 
 Static checks (run, don’t auto‑fix):
+- You MUST attempt to discover and run configured project linters/type checkers for the files in scope. Begin by briefly listing which checks you will run (or why none are applicable), then run them.
 - Determine affected subprojects from the changed paths and run the project’s checker/linter only for those parts.
   - Rust: run `cargo clippy -p <crate> --tests --all-features` (no `--fix`) and/or `cargo check -p <crate>` for each affected crate.
   - JS/TS: run `npm run -w <pkg> lint` and `npm run -w <pkg> typecheck` where applicable.
   - Python: run `ruff`/`flake8` and `mypy` scoped to changed modules.
 - Record any errors or warnings that overlap the diff. Elevate substantive ones to findings (cite the rule/lint), otherwise summarize them under `overall_explanation` as “Checker/Linter notes”.
-- If a checker cannot run, note the reason and continue with manual review.
+- If a checker cannot run, state exactly what you tried and why it could not run, then continue with manual review.
 
 Scope filters (skip "junk" files unless there is a direct, non‑speculative impact — and avoid fetching diffs for them):
 - Package manager lockfiles (e.g., `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`).
