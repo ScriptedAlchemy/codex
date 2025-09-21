@@ -1922,7 +1922,7 @@ async fn run_task(
             })
             .collect();
         match run_turn(
-            &sess,
+            sess.clone(),
             turn_context.as_ref(),
             &mut turn_diff_tracker,
             sub_id.clone(),
@@ -2151,7 +2151,7 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
 }
 
 async fn run_turn(
-    sess: &Session,
+    sess: Arc<Session>,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: String,
@@ -2170,7 +2170,15 @@ async fn run_turn(
 
     let mut retries = 0;
     loop {
-        match try_run_turn(sess, turn_context, turn_diff_tracker, &sub_id, &prompt).await {
+        match try_run_turn(
+            sess.clone(),
+            turn_context,
+            turn_diff_tracker,
+            &sub_id,
+            &prompt,
+        )
+        .await
+        {
             Ok(output) => return Ok(output),
             Err(CodexErr::Interrupted) => return Err(CodexErr::Interrupted),
             Err(CodexErr::EnvVar(var)) => return Err(CodexErr::EnvVar(var)),
@@ -2227,7 +2235,7 @@ struct TurnRunResult {
 }
 
 async fn try_run_turn(
-    sess: &Session,
+    sess: Arc<Session>,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: &str,
@@ -2328,7 +2336,7 @@ async fn try_run_turn(
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(item) => {
                 let response = handle_response_item(
-                    sess,
+                    sess.clone(),
                     turn_context,
                     turn_diff_tracker,
                     sub_id,
@@ -2420,7 +2428,7 @@ async fn try_run_turn(
 }
 
 async fn handle_response_item(
-    sess: &Session,
+    sess: Arc<Session>,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: &str,
@@ -2437,7 +2445,7 @@ async fn handle_response_item(
             info!("FunctionCall: {name}({arguments})");
             Some(
                 handle_function_call(
-                    sess,
+                    &sess,
                     turn_context,
                     turn_diff_tracker,
                     sub_id.to_string(),
@@ -2499,7 +2507,7 @@ async fn handle_response_item(
             status: _,
         } => Some(
             handle_custom_tool_call(
-                &sess,
+                sess.clone(),
                 turn_context,
                 turn_diff_tracker,
                 sub_id.to_string(),
@@ -2807,7 +2815,7 @@ async fn handle_function_call(
 }
 
 async fn handle_custom_tool_call(
-    sess: &Session,
+    sess: Arc<Session>,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: String,
@@ -2865,7 +2873,11 @@ async fn handle_custom_tool_call(
             // Default to blocking mode
             let mode = args.mode.clone().unwrap_or_else(|| "blocking".to_string());
             let result = if mode.eq_ignore_ascii_case("nonblocking") {
-                Err("nonblocking mode is not yet supported in v1".to_string())
+                let sess2 = Arc::clone(&sess);
+                tokio::spawn(async move {
+                    let _ = sess2.subagent_reply_blocking(&args).await;
+                });
+                Ok(serde_json::json!({ "accepted": true }))
             } else {
                 sess.subagent_reply_blocking(&args).await
             };
@@ -2960,7 +2972,7 @@ async fn handle_custom_tool_call(
             };
             let resp = handle_container_exec_with_params(
                 exec_params,
-                sess,
+                &sess,
                 turn_context,
                 turn_diff_tracker,
                 sub_id,
@@ -3063,6 +3075,75 @@ fn to_exec_params(params: ShellToolCallParams, turn_context: &TurnContext) -> Ex
         with_escalated_permissions: params.with_escalated_permissions,
         justification: params.justification,
     }
+}
+
+/// If running a small `git diff` in review mode, bypass model-format truncation and
+/// return a JSON payload containing the full diff text.
+fn maybe_format_untruncated_git_diff(
+    turn_context: &TurnContext,
+    params: &ExecParams,
+    output: &ExecToolCallOutput,
+    command_for_display: &str,
+) -> Option<String> {
+    if !turn_context.is_review_mode {
+        return None;
+    }
+    // Heuristic: detect `git diff` regardless of full path/extension for git.
+    let is_git = params
+        .command
+        .get(0)
+        .map(|c| {
+            let lc = c.to_lowercase();
+            lc.ends_with("git") || lc.ends_with("git.exe") || lc.ends_with("git.cmd") || lc == "git"
+        })
+        .unwrap_or(false);
+    let is_diff = params.command.get(1).map(|a| a == "diff").unwrap_or(false);
+    if !(is_git && is_diff) {
+        return None;
+    }
+
+    // Estimate tokens as bytes/4 and allow up to ~500k tokens (~2MB) untruncated per call.
+    let bytes = output.aggregated_output.text.len();
+    const MAX_TOKENS: usize = 500_000;
+    const MAX_BYTES: usize = MAX_TOKENS * 4;
+    if bytes > MAX_BYTES {
+        return None;
+    }
+
+    #[derive(Serialize)]
+    struct ExecMetadata {
+        exit_code: i32,
+        duration_seconds: f32,
+        command: String,
+    }
+
+    #[derive(Serialize)]
+    struct ExecOutput<'a> {
+        output: &'a str,
+        metadata: ExecMetadata,
+    }
+
+    let mut text = output.aggregated_output.text.clone();
+    if output.timed_out {
+        text = format!(
+            "command timed out after {} milliseconds\n{}",
+            output.duration.as_millis(),
+            text
+        );
+    }
+
+    // round to 1 decimal place
+    let duration_seconds = ((output.duration.as_secs_f32()) * 10.0).round() / 10.0;
+    let payload = ExecOutput {
+        output: &text,
+        metadata: ExecMetadata {
+            exit_code: output.exit_code,
+            duration_seconds,
+            command: command_for_display.to_string(),
+        },
+    };
+    #[expect(clippy::expect_used)]
+    Some(serde_json::to_string(&payload).expect("serialize ExecOutput (untruncated git diff)"))
 }
 
 fn parse_container_exec_arguments(
@@ -3636,7 +3717,14 @@ async fn handle_container_exec_with_params(
             let ExecToolCallOutput { exit_code, .. } = &output;
 
             let is_success = *exit_code == 0;
-            let content = format_exec_output(&output);
+            let command_for_display_str = command_for_display.join(" ");
+            let content = maybe_format_untruncated_git_diff(
+                turn_context,
+                &params,
+                &output,
+                &command_for_display_str,
+            )
+            .unwrap_or_else(|| format_exec_output(&output));
             ResponseInputItem::FunctionCallOutput {
                 call_id: call_id.clone(),
                 output: FunctionCallOutputPayload {
@@ -3748,7 +3836,7 @@ async fn handle_sandbox_error(
                     turn_diff_tracker,
                     exec_command_context.clone(),
                     ExecInvokeArgs {
-                        params,
+                        params: params.clone(),
                         sandbox_type: SandboxType::None,
                         sandbox_policy: &turn_context.sandbox_policy,
                         sandbox_cwd: &turn_context.cwd,
@@ -3771,7 +3859,15 @@ async fn handle_sandbox_error(
                     let ExecToolCallOutput { exit_code, .. } = &retry_output;
 
                     let is_success = *exit_code == 0;
-                    let content = format_exec_output(&retry_output);
+                    let command_for_display_str =
+                        exec_command_context.command_for_display.join(" ");
+                    let content = maybe_format_untruncated_git_diff(
+                        turn_context,
+                        &params,
+                        &retry_output,
+                        &command_for_display_str,
+                    )
+                    .unwrap_or_else(|| format_exec_output(&retry_output));
 
                     ResponseInputItem::FunctionCallOutput {
                         call_id: call_id.clone(),

@@ -9,9 +9,12 @@ use tokio::process::Command;
 /// Preference order:
 /// 1. If a PR exists (GitHub CLI), use its base ref (remote or local).
 /// 2. If upstream points to a different branch than the current local branch name, use it.
-/// 3. The default branch of the primary remote (prefer `origin`), via `refs/remotes/<remote>/HEAD`.
-/// 4. Remote common fallbacks: `origin/main`, `origin/master`, `origin/trunk`, `origin/develop`.
-/// 5. Local common fallbacks: `main`, `master`, `trunk`, `develop`.
+/// 3. Fork-point based heuristic among common base candidates (remote/local): pick the candidate with
+///    the most recent fork-point (`git merge-base --fork-point <cand> HEAD`), falling back to
+///    `git merge-base` when the reflog is absent. Reason is `fork-point: <branch>`.
+/// 4. The default branch of the primary remote (prefer `origin`), via `refs/remotes/<remote>/HEAD`.
+/// 5. Remote common fallbacks: `origin/main`, `origin/master`, `origin/trunk`, `origin/develop`.
+/// 6. Local common fallbacks: `main`, `master`, `trunk`, `develop`.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedBase {
     pub base: String,
@@ -59,7 +62,58 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
         }
     }
 
-    // 2) Remote default HEAD, then common remote names.
+    // 2) Fork-point heuristic across likely base branches (remote and local).
+    //    This helps local-only branches that are multiple levels deep.
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(remote) = default_remote().await? {
+        if let Some(sym) = remote_head_symbolic_ref(&remote).await? {
+            candidates.push(sym);
+        }
+        for name in ["main", "master", "trunk", "develop"] {
+            candidates.push(format!("{remote}/{name}"));
+        }
+    }
+    // Local names as well (works in repos without remotes)
+    for name in ["main", "master", "trunk", "develop"] {
+        candidates.push(name.to_string());
+    }
+    // Filter to those that actually resolve
+    let mut best: Option<(String, usize)> = None; // (ref, head_distance)
+    for cand in candidates {
+        if !rev_parse_verify(&cand).await? {
+            continue;
+        }
+        if let Some(fp) = merge_base_fork_point(&cand).await? {
+            if let Some(dist) = rev_list_count(&fp, "HEAD").await? {
+                match best {
+                    None => best = Some((cand.clone(), dist)),
+                    Some((_, d)) if dist < d => best = Some((cand.clone(), dist)),
+                    _ => {}
+                }
+            }
+        } else if let Some(fp) = merge_base(&cand).await? {
+            if let Some(dist) = rev_list_count(&fp, "HEAD").await? {
+                match best {
+                    None => best = Some((cand.clone(), dist)),
+                    Some((_, d)) if dist < d => best = Some((cand.clone(), dist)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    if let Some((base, _)) = best {
+        let tail_owned = base
+            .rsplit('/')
+            .next()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| base.clone());
+        return Ok(ResolvedBase {
+            base,
+            reason: format!("fork-point: {}", tail_owned),
+        });
+    }
+
+    // 3) Remote default HEAD, then common remote names.
     if let Some(remote) = default_remote().await? {
         if let Some(sym) = remote_head_symbolic_ref(&remote).await? {
             let tail = sym.rsplit('/').next().unwrap_or("");
@@ -77,7 +131,7 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
         }
     }
 
-    // 3) Local common branch names (repos without remotes)
+    // 4) Local common branch names (repos without remotes)
     for name in ["main", "master", "trunk", "develop"] {
         if rev_parse_verify(name).await? {
             return Ok(ResolvedBase {
@@ -167,6 +221,27 @@ async fn remote_head_symbolic_ref(remote: &str) -> io::Result<Option<String>> {
         return Ok(Some(trimmed.to_string()));
     }
     Ok(None)
+}
+
+/// `git merge-base --fork-point <ref> HEAD` to find the fork-point commit, if any.
+async fn merge_base_fork_point(r: &str) -> io::Result<Option<String>> {
+    maybe_capture_stdout(&["merge-base", "--fork-point", r, "HEAD"]).await
+}
+
+/// `git merge-base <ref> HEAD` fallback when fork-point is unavailable.
+async fn merge_base(r: &str) -> io::Result<Option<String>> {
+    maybe_capture_stdout(&["merge-base", r, "HEAD"]).await
+}
+
+/// Count commits in the range `<from>.. <to>`.
+async fn rev_list_count(from: &str, to: &str) -> io::Result<Option<usize>> {
+    if let Some(text) =
+        maybe_capture_stdout(&["rev-list", "--count", &format!("{from}..{to}")]).await?
+    {
+        Ok(text.parse::<usize>().ok())
+    } else {
+        Ok(None)
+    }
 }
 
 /// Return `true` if `rev-parse --verify --quiet <ref>` succeeds.
