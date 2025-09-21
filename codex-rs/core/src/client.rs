@@ -204,8 +204,22 @@ impl ModelClient {
         // For Azure, we send `store: true` and preserve reasoning item IDs.
         let azure_workaround = self.provider.is_azure_responses_endpoint();
 
+        // Some backends expect legacy slugs even when the UI shows
+        // the new swiftfox-* presets. Translate here to keep UI names
+        // stable while ensuring wire compatibility.
+        fn api_model_slug_for_responses(ui_slug: &str) -> std::borrow::Cow<'_, str> {
+            if ui_slug.starts_with("swiftfox-") {
+                // Map all swiftfox presets to the codex family slug
+                // understood by the backend Responses API.
+                std::borrow::Cow::Owned("gpt-5-codex".to_string())
+            } else {
+                std::borrow::Cow::Borrowed(ui_slug)
+            }
+        }
+
+        let api_model = api_model_slug_for_responses(&self.config.model);
         let payload = ResponsesApiRequest {
-            model: &self.config.model,
+            model: &api_model,
             instructions: &full_instructions,
             input: &input_with_instructions,
             tools: &tools_json,
