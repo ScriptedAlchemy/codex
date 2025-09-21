@@ -115,6 +115,7 @@ use crate::protocol::SessionConfiguredEvent;
 use crate::protocol::StreamErrorEvent;
 use crate::protocol::Submission;
 use crate::protocol::TaskCompleteEvent;
+use crate::protocol::TokenCountEvent;
 use crate::protocol::TokenUsage;
 use crate::protocol::TokenUsageInfo;
 use crate::protocol::TurnDiffEvent;
@@ -2481,7 +2482,7 @@ async fn handle_response_item(
             Some(
                 handle_container_exec_with_params(
                     exec_params,
-                    sess,
+                    &sess,
                     turn_context,
                     turn_diff_tracker,
                     sub_id.to_string(),
@@ -2498,7 +2499,7 @@ async fn handle_response_item(
             status: _,
         } => Some(
             handle_custom_tool_call(
-                sess,
+                &sess,
                 turn_context,
                 turn_diff_tracker,
                 sub_id.to_string(),
@@ -2847,6 +2848,107 @@ async fn handle_custom_tool_call(
                 },
             }
         }
+        "subagent.reply" => {
+            let args = match serde_json::from_str::<SubagentReplyArgs>(&input) {
+                Ok(args) => args,
+                Err(err) => {
+                    return ResponseInputItem::CustomToolCallOutput {
+                        call_id,
+                        output: serde_json::json!({
+                            "error": format!("failed to parse subagent.reply arguments: {err}")
+                        })
+                        .to_string(),
+                    };
+                }
+            };
+
+            // Default to blocking mode
+            let mode = args.mode.clone().unwrap_or_else(|| "blocking".to_string());
+            let result = if mode.eq_ignore_ascii_case("nonblocking") {
+                Err("nonblocking mode is not yet supported in v1".to_string())
+            } else {
+                sess.subagent_reply_blocking(&args).await
+            };
+
+            match result {
+                Ok(val) => ResponseInputItem::CustomToolCallOutput {
+                    call_id,
+                    output: val.to_string(),
+                },
+                Err(err) => ResponseInputItem::CustomToolCallOutput {
+                    call_id,
+                    output: serde_json::json!({ "error": err }).to_string(),
+                },
+            }
+        }
+        "subagent.mailbox" => {
+            let args = match serde_json::from_str::<SubagentMailboxArgs>(&input) {
+                Ok(args) => args,
+                Err(err) => {
+                    return ResponseInputItem::CustomToolCallOutput {
+                        call_id,
+                        output: serde_json::json!({
+                            "error": format!("failed to parse subagent.mailbox arguments: {err}")
+                        })
+                        .to_string(),
+                    };
+                }
+            };
+
+            let out = sess.list_mailbox(args).await;
+            ResponseInputItem::CustomToolCallOutput {
+                call_id,
+                output: out.to_string(),
+            }
+        }
+        "subagent.read" => {
+            let args = match serde_json::from_str::<SubagentReadArgs>(&input) {
+                Ok(args) => args,
+                Err(err) => {
+                    return ResponseInputItem::CustomToolCallOutput {
+                        call_id,
+                        output: serde_json::json!({
+                            "error": format!("failed to parse subagent.read arguments: {err}")
+                        })
+                        .to_string(),
+                    };
+                }
+            };
+            match sess.read_mail(args).await {
+                Ok(val) => ResponseInputItem::CustomToolCallOutput {
+                    call_id,
+                    output: val.to_string(),
+                },
+                Err(err) => ResponseInputItem::CustomToolCallOutput {
+                    call_id,
+                    output: serde_json::json!({ "error": err }).to_string(),
+                },
+            }
+        }
+        "subagent.end" => {
+            let args = match serde_json::from_str::<SubagentEndArgs>(&input) {
+                Ok(args) => args,
+                Err(err) => {
+                    return ResponseInputItem::CustomToolCallOutput {
+                        call_id,
+                        output: serde_json::json!({
+                            "error": format!("failed to parse subagent.end arguments: {err}")
+                        })
+                        .to_string(),
+                    };
+                }
+            };
+            match sess.end_subagent(args).await {
+                Ok(val) => ResponseInputItem::CustomToolCallOutput {
+                    call_id,
+                    output: val.to_string(),
+                },
+                Err(err) => ResponseInputItem::CustomToolCallOutput {
+                    call_id,
+                    output: serde_json::json!({ "error": err }).to_string(),
+                },
+            }
+        }
         "apply_patch" => {
             let exec_params = ExecParams {
                 command: vec!["apply_patch".to_string(), input.clone()],
@@ -2914,6 +3016,44 @@ struct SubagentOpenResult {
     description: String,
 }
 
+#[derive(Deserialize)]
+struct SubagentReplyArgs {
+    subagent_id: String,
+    message: String,
+    #[serde(default)]
+    images: Option<Vec<String>>,
+    #[serde(default)]
+    mode: Option<String>, // "blocking" | "nonblocking" (default blocking)
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SubagentMailboxArgs {
+    #[serde(default)]
+    subagent_id: Option<String>,
+    #[serde(default)]
+    only_unread: Option<bool>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SubagentReadArgs {
+    mail_id: String,
+    #[serde(default)]
+    peek: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct SubagentEndArgs {
+    subagent_id: String,
+    #[serde(default)]
+    persist: Option<bool>,
+    #[serde(default)]
+    archive_to: Option<String>,
+}
+
 fn to_exec_params(params: ShellToolCallParams, turn_context: &TurnContext) -> ExecParams {
     ExecParams {
         command: params.command,
@@ -2961,6 +3101,308 @@ fn summarize_goal(goal: &str) -> String {
         summary.push('…');
     }
     summary
+}
+
+impl Session {
+    async fn subagent_reply_blocking(
+        &self,
+        args: &SubagentReplyArgs,
+    ) -> Result<serde_json::Value, String> {
+        let subagent_id = &args.subagent_id;
+        let message = &args.message;
+        let images = args.images.clone().unwrap_or_default();
+
+        // Fetch subagent state and basic guards.
+        let mut guard = self.subagents.lock().await;
+        let state = match guard.get_mut(subagent_id) {
+            Some(s) => s,
+            None => return Err(format!("unknown subagent_id: {subagent_id}")),
+        };
+        if state.running {
+            return Err("subagent is already running".to_string());
+        }
+        if let Some(max_turns) = state.max_turns {
+            if state.turns_completed >= max_turns {
+                return Err("subagent turn limit reached".to_string());
+            }
+        }
+        state.running = true; // mark busy
+        let description = state.description.clone();
+        let conversation = state.conversation.clone();
+        let max_idle = state.max_runtime; // interpreted as idle window
+        drop(guard);
+
+        // Build child input items
+        let mut items: Vec<InputItem> = Vec::new();
+        items.push(InputItem::Text {
+            text: message.clone(),
+        });
+        for img in images.into_iter() {
+            items.push(InputItem::LocalImage {
+                path: PathBuf::from(img),
+            });
+        }
+
+        // Submit user input to child
+        let _child_submit_id = conversation
+            .submit(Op::UserInput { items })
+            .await
+            .map_err(|e| format!("failed to submit to subagent: {e}"))?;
+
+        // Event loop: collect reply, token usage; enforce idle timeout
+        let mut reply_text: String = String::new();
+        let mut last_usage: Option<TokenUsage> = None;
+
+        // Compute dynamic idle budget per next_event call.
+        loop {
+            let next_event_fut = conversation.next_event();
+            let evt_res = if let Some(max_idle) = max_idle {
+                // Compute remaining idle budget from last_active
+                let (remaining, timed_out) = {
+                    let mut sub_map = self.subagents.lock().await;
+                    let st = sub_map
+                        .get_mut(subagent_id)
+                        .expect("subagent present during run");
+                    let since = st.last_active.elapsed();
+                    if since >= max_idle {
+                        (Duration::from_millis(0), true)
+                    } else {
+                        (max_idle - since, false)
+                    }
+                };
+                if timed_out || remaining.is_zero() {
+                    // Immediate idle timeout
+                    Err(())
+                } else {
+                    match tokio::time::timeout(remaining, next_event_fut).await {
+                        Ok(res) => Ok(res),
+                        Err(_) => Err(()),
+                    }
+                }
+            } else {
+                // No idle ceiling; wait normally
+                Ok(next_event_fut.await)
+            };
+
+            match evt_res {
+                Ok(Ok(Event { msg, .. })) => {
+                    // Any child activity refreshes last_active
+                    {
+                        let mut sub_map = self.subagents.lock().await;
+                        if let Some(st) = sub_map.get_mut(subagent_id) {
+                            st.last_active = Instant::now();
+                        }
+                    }
+
+                    match msg {
+                        EventMsg::AgentMessageDelta(delta) => {
+                            reply_text.push_str(&delta.delta);
+                        }
+                        EventMsg::AgentMessage(ev) => {
+                            reply_text.push_str(&ev.message);
+                        }
+                        EventMsg::TokenCount(TokenCountEvent { info }) => {
+                            if let Some(info) = info {
+                                last_usage = Some(info.last_token_usage);
+                            }
+                        }
+                        EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
+                            if let Some(full) = last_agent_message {
+                                if !full.is_empty() {
+                                    reply_text = full;
+                                }
+                            }
+                            // Turn finished normally
+                            break;
+                        }
+                        // Ignore other events for the mailbox v1 path
+                        _ => {}
+                    }
+                }
+                Ok(Err(e)) => {
+                    reply_text = format!("subagent error: {e}");
+                    break;
+                }
+                Err(()) => {
+                    // Idle timeout: interrupt child and note timeout
+                    let _ = conversation.submit(Op::Interrupt).await;
+                    reply_text = "Subagent timed out due to inactivity".to_string();
+                    // Also enqueue a background notification below.
+                    break;
+                }
+            }
+        }
+
+        // Update state and enqueue mailbox entry
+        let mut sub_map = self.subagents.lock().await;
+        if let Some(st) = sub_map.get_mut(subagent_id) {
+            st.turns_completed += 1;
+            st.running = false;
+        }
+        drop(sub_map);
+
+        let mail_id = self
+            .enqueue_mail(subagent_id, &description, &reply_text, last_usage.clone())
+            .await;
+
+        // Notify parent UI
+        self.notify_background_event(
+            subagent_id,
+            format!("Subagent {subagent_id} replied: {description}"),
+        )
+        .await;
+
+        Ok(serde_json::json!({
+            "reply": reply_text,
+            "token_usage": last_usage,
+            "done": true,
+            "mail_id": mail_id,
+        }))
+    }
+
+    async fn enqueue_mail(
+        &self,
+        subagent_id: &str,
+        subject: &str,
+        body: &str,
+        token_usage: Option<TokenUsage>,
+    ) -> String {
+        let mut box_guard = self.mailbox.lock().await;
+        let id_num = box_guard.next_id;
+        box_guard.next_id += 1;
+        let mail_id = format!("mail-{id_num}");
+        let turn_idx = {
+            let subs = self.subagents.lock().await;
+            subs.get(subagent_id)
+                .map(|s| s.turns_completed)
+                .unwrap_or(0)
+        };
+        let item = MailItem {
+            id: mail_id.clone(),
+            subagent_id: subagent_id.to_string(),
+            subject: subject.to_string(),
+            body: body.to_string(),
+            token_usage,
+            timestamp: SystemTime::now(),
+            unread: true,
+            turn_index: turn_idx,
+        };
+        box_guard.order.push_front(mail_id.clone());
+        box_guard.items.insert(mail_id.clone(), item);
+        mail_id
+    }
+
+    // (nonblocking reply handled at call site by capturing Arc<Session> and spawning a task)
+
+    async fn list_mailbox(&self, filter: SubagentMailboxArgs) -> serde_json::Value {
+        let SubagentMailboxArgs {
+            subagent_id,
+            only_unread,
+            limit,
+        } = filter;
+        let only_unread = only_unread.unwrap_or(false);
+        let limit = limit.unwrap_or(100);
+        let guard = self.mailbox.lock().await;
+        let mut items = Vec::new();
+        for id in guard.order.iter() {
+            if let Some(mi) = guard.items.get(id) {
+                if only_unread && !mi.unread {
+                    continue;
+                }
+                if let Some(ref sid) = subagent_id {
+                    if &mi.subagent_id != sid {
+                        continue;
+                    }
+                }
+                let at: chrono::DateTime<chrono::Utc> = mi.timestamp.into();
+                items.push(serde_json::json!({
+                    "mail_id": mi.id,
+                    "subagent_id": mi.subagent_id,
+                    "subject": mi.subject,
+                    "at": at.to_rfc3339(),
+                    "unread": mi.unread,
+                    "turns_completed": mi.turn_index,
+                }));
+                if items.len() >= limit {
+                    break;
+                }
+            }
+        }
+        serde_json::json!({"items": items})
+    }
+
+    async fn read_mail(&self, args: SubagentReadArgs) -> Result<serde_json::Value, String> {
+        let SubagentReadArgs { mail_id, peek } = args;
+        let mut guard = self.mailbox.lock().await;
+        let item = guard
+            .items
+            .get_mut(&mail_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown mail_id: {mail_id}"))?;
+        if !peek.unwrap_or(false) {
+            if let Some(mi) = guard.items.get_mut(&mail_id) {
+                mi.unread = false;
+            }
+        }
+        let at: chrono::DateTime<chrono::Utc> = item.timestamp.into();
+        Ok(serde_json::json!({
+            "subagent_id": item.subagent_id,
+            "subject": item.subject,
+            "body": item.body,
+            "token_usage": item.token_usage,
+            "at": at.to_rfc3339(),
+        }))
+    }
+
+    async fn end_subagent(&self, args: SubagentEndArgs) -> Result<serde_json::Value, String> {
+        let SubagentEndArgs {
+            subagent_id,
+            persist,
+            archive_to,
+        } = args;
+
+        // Take ownership of the state
+        let (conversation, conversation_id, rollout_path) = {
+            let mut map = self.subagents.lock().await;
+            let Some(state) = map.remove(&subagent_id) else {
+                return Err(format!("unknown subagent_id: {subagent_id}"));
+            };
+            (
+                state.conversation,
+                state.conversation_id,
+                state.rollout_path,
+            )
+        };
+
+        // Gracefully shutdown child conversation
+        let _ = conversation.submit(Op::Shutdown).await;
+        // Drain one event (best effort) to allow graceful shutdown
+        let _ = tokio::time::timeout(Duration::from_secs(2), conversation.next_event()).await;
+
+        // Handle persistence/archival
+        let mut archived_path: Option<String> = None;
+        match (persist.unwrap_or(true), archive_to) {
+            (false, _) => {
+                let _ = std::fs::remove_file(&rollout_path);
+            }
+            (true, Some(dir)) => {
+                let to_dir = PathBuf::from(dir);
+                let _ = std::fs::create_dir_all(&to_dir);
+                if let Some(name) = rollout_path.file_name() {
+                    let dest = to_dir.join(name);
+                    if std::fs::rename(&rollout_path, &dest).is_ok() {
+                        archived_path = Some(dest.to_string_lossy().to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Ok(serde_json::json!({
+            "conversation_id": conversation_id,
+            "archived_path": archived_path,
+        }))
+    }
 }
 
 pub struct ExecInvokeArgs<'a> {
