@@ -58,7 +58,8 @@ pub(crate) async fn collect_branch_numstat(base: &str) -> io::Result<Vec<Numstat
     }
     // Filter out low-value/junk paths to avoid reviewing lockfiles, docs-only, binaries, etc.
     rows.retain(|r| !is_junk_path(&r.path));
-    // Keep zero-line rows (submodule pointers, binaries) — they still matter for review context.
+    // Drop entries with no line changes (pure renames/mode changes) to avoid empty batches.
+    rows.retain(|r| r.added + r.deleted > 0);
     Ok(rows)
 }
 

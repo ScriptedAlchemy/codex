@@ -58,12 +58,6 @@ impl Orchestrator {
             consolidation_prompt_tmpl: config.consolidation_prompt_tmpl,
         })
     }
-
-    #[allow(dead_code)]
-    pub fn is_running(&self) -> bool {
-        self.stage != Stage::Done
-    }
-
     pub fn has_batches(&self) -> bool {
         !self.batches.is_empty()
     }
@@ -157,12 +151,6 @@ impl Orchestrator {
 /// Build a compact consolidation package to keep token size low.
 fn build_consolidation_package(findings: &[ReviewFinding]) -> (String, String) {
     // Very light clustering: group by file and overlapping ranges (<= 5 lines apart), similar titles (case-insensitive prefix match).
-    #[allow(dead_code)]
-    #[derive(Clone)]
-    struct Key<'a> {
-        path: &'a str,
-        start: u32,
-    }
     let mut items: Vec<&ReviewFinding> = findings.iter().collect();
     items.sort_by(|a, b| {
         a.code_location
@@ -249,16 +237,6 @@ mod tests {
         };
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let config = OrchestratorConfig {
-            chunk_limits: ChunkLimits {
-                small_files_cap: 10,
-                large_files_cap: 5,
-                large_file_threshold_lines: 100,
-                max_lines: 1000,
-            },
-            batch_prompt_tmpl: "{base} {batch_index}/{batch_total} {size_hint} {file_list}",
-            consolidation_prompt_tmpl: "{base} {stats} {clusters}",
-        };
         let mut orc = Orchestrator {
             base: "origin/main".to_string(),
             reason: "PR base: main".to_string(),
@@ -267,8 +245,8 @@ mod tests {
             acc: Vec::new(),
             stage: Stage::Batching,
             tx,
-            batch_prompt_tmpl: config.batch_prompt_tmpl,
-            consolidation_prompt_tmpl: config.consolidation_prompt_tmpl,
+            batch_prompt_tmpl: "{base} {batch_index}/{batch_total} {size_hint} {file_list}",
+            consolidation_prompt_tmpl: "{base} {stats} {clusters}",
         };
 
         orc.start();

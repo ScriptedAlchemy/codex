@@ -94,7 +94,7 @@ pub async fn run_main(
     let (sandbox_mode, approval_policy) = if cli.full_auto {
         (
             Some(SandboxMode::WorkspaceWrite),
-            Some(AskForApproval::OnFailure),
+            Some(AskForApproval::OnRequest),
         )
     } else if cli.dangerously_bypass_approvals_and_sandbox {
         (
@@ -390,9 +390,9 @@ async fn run_ratatui_app(
         &cli,
         &config,
         active_profile.as_deref(),
-        internal_storage.swiftfox_model_prompt_seen,
+        internal_storage.gpt_5_codex_model_prompt_seen,
     ) {
-        internal_storage.swiftfox_model_prompt_seen = true;
+        internal_storage.gpt_5_codex_model_prompt_seen = true;
         if let Err(e) = internal_storage.persist().await {
             error!("Failed to persist internal storage: {e:?}");
         }
@@ -534,13 +534,13 @@ fn should_show_model_rollout_prompt(
     cli: &Cli,
     config: &Config,
     active_profile: Option<&str>,
-    swiftfox_model_prompt_seen: bool,
+    gpt_5_codex_model_prompt_seen: bool,
 ) -> bool {
     let login_status = get_login_status(config);
 
     active_profile.is_none()
         && cli.model.is_none()
-        && !swiftfox_model_prompt_seen
+        && !gpt_5_codex_model_prompt_seen
         && config.model_provider.requires_openai_auth
         && matches!(login_status, LoginStatus::AuthMode(AuthMode::ChatGPT))
         && !cli.oss

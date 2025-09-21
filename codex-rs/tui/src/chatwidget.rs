@@ -997,23 +997,23 @@ impl ChatWidget {
                                     );
                                     // If large, use orchestrated multi-batch flow.
                                     if (files > 50 || (added + deleted) > 5000)
-                                            && let Ok(orc) =
-                                                crate::review_branch::orchestrator::Orchestrator::new(
-                                                    tx.clone(),
-                                                    base.clone(),
-                                                    reason.clone(),
-                                                    crate::review_branch::orchestrator::OrchestratorConfig {
-                                                        chunk_limits: crate::review_branch::chunker::ChunkLimits {
-                                                            small_files_cap: 25,
-                                                            large_files_cap: 5,
-                                                            large_file_threshold_lines: 400,
-                                                            max_lines: 5000,
-                                                        },
-                                                        batch_prompt_tmpl: REVIEW_BRANCH_BATCH_PROMPT_TMPL,
-                                                        consolidation_prompt_tmpl: REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL,
+                                        && let Ok(orc) =
+                                            crate::review_branch::orchestrator::Orchestrator::new(
+                                                tx.clone(),
+                                                base.clone(),
+                                                reason.clone(),
+                                                crate::review_branch::orchestrator::OrchestratorConfig {
+                                                    chunk_limits: crate::review_branch::chunker::ChunkLimits {
+                                                        small_files_cap: 25,
+                                                        large_files_cap: 5,
+                                                        large_file_threshold_lines: 400,
+                                                        max_lines: 5000,
                                                     },
-                                                )
-                                                .await
+                                                    batch_prompt_tmpl: REVIEW_BRANCH_BATCH_PROMPT_TMPL,
+                                                    consolidation_prompt_tmpl: REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL,
+                                                },
+                                            )
+                                            .await
                                         && orc.has_batches()
                                     {
                                         tx.send(AppEvent::InsertHistoryCell(Box::new(

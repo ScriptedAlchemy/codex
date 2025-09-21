@@ -115,6 +115,7 @@ use crate::protocol::ListCustomPromptsResponseEvent;
 use crate::protocol::Op;
 use crate::protocol::PatchApplyBeginEvent;
 use crate::protocol::PatchApplyEndEvent;
+use crate::protocol::RateLimitSnapshotEvent;
 use crate::protocol::ReviewDecision;
 use crate::protocol::ReviewOutputEvent;
 use crate::protocol::SandboxPolicy;
@@ -280,6 +281,7 @@ struct State {
     pending_input: Vec<ResponseInputItem>,
     history: ConversationHistory,
     token_info: Option<TokenUsageInfo>,
+    latest_rate_limits: Option<RateLimitSnapshotEvent>,
 }
 
 /// Context for an initialized model agent
@@ -990,16 +992,35 @@ impl Session {
     async fn update_token_usage_info(
         &self,
         turn_context: &TurnContext,
-        token_usage: &Option<TokenUsage>,
-    ) -> Option<TokenUsageInfo> {
+        token_usage: Option<&TokenUsage>,
+    ) {
         let mut state = self.state.lock().await;
-        let info = TokenUsageInfo::new_or_append(
-            &state.token_info,
-            token_usage,
-            turn_context.client.get_model_context_window(),
-        );
-        state.token_info = info.clone();
-        info
+        if let Some(token_usage) = token_usage {
+            let info = TokenUsageInfo::new_or_append(
+                &state.token_info,
+                &Some(token_usage.clone()),
+                turn_context.client.get_model_context_window(),
+            );
+            state.token_info = info;
+        }
+    }
+
+    async fn update_rate_limits(&self, new_rate_limits: RateLimitSnapshotEvent) {
+        let mut state = self.state.lock().await;
+        state.latest_rate_limits = Some(new_rate_limits);
+    }
+
+    async fn clear_rate_limits(&self) {
+        let mut state = self.state.lock().await;
+        state.latest_rate_limits = None;
+    }
+
+    async fn get_token_count_event(&self) -> TokenCountEvent {
+        let state = self.state.lock().await;
+        TokenCountEvent {
+            info: state.token_info.clone(),
+            rate_limits: state.latest_rate_limits.clone(),
+        }
     }
 
     /// Record a user input item to conversation history and also persist a
@@ -2257,6 +2278,9 @@ async fn run_turn(
     sub_id: String,
     input: Vec<ResponseItem>,
 ) -> CodexResult<TurnRunResult> {
+    // Ensure each turn reports only the current response's rate-limit snapshot.
+    sess.clear_rate_limits().await;
+
     let tools = get_openai_tools(
         &turn_context.tools_config,
         Some(sess.mcp_connection_manager.list_all_tools()),
@@ -2454,17 +2478,22 @@ async fn try_run_turn(
                     })
                     .await;
             }
+            ResponseEvent::RateLimits(snapshot) => {
+                // Update internal state with latest rate limits, but defer sending until
+                // token usage is available to avoid duplicate TokenCount events.
+                sess.update_rate_limits(snapshot).await;
+            }
             ResponseEvent::Completed {
                 response_id: _,
                 token_usage,
             } => {
-                let info = sess
-                    .update_token_usage_info(turn_context, &token_usage)
+                sess.update_token_usage_info(turn_context, token_usage.as_ref())
                     .await;
+                let token_event = sess.get_token_count_event().await;
                 let _ = sess
                     .send_event(Event {
                         id: sub_id.to_string(),
-                        msg: EventMsg::TokenCount(crate::protocol::TokenCountEvent { info }),
+                        msg: EventMsg::TokenCount(token_event),
                     })
                     .await;
 
@@ -3408,10 +3437,12 @@ impl Session {
                         EventMsg::AgentMessage(ev) => {
                             reply_text.push_str(&ev.message);
                         }
-                        EventMsg::TokenCount(TokenCountEvent { info: Some(info) }) => {
+                        EventMsg::TokenCount(TokenCountEvent {
+                            info: Some(info), ..
+                        }) => {
                             last_usage = Some(info.last_token_usage);
                         }
-                        EventMsg::TokenCount(TokenCountEvent { info: None }) => {}
+                        EventMsg::TokenCount(TokenCountEvent { info: None, .. }) => {}
                         EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
                             if let Some(full) = last_agent_message
                                 && !full.is_empty()
