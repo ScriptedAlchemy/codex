@@ -45,11 +45,16 @@ GUIDELINES:
 
 LINTERS AND TYPE CHECKERS:
 
-- Infer whether this repo or the modified subproject uses a linter or type checker by inspecting configuration and script files (e.g., `Cargo.toml`, `package.json`, `tsconfig.json`, `ruff.toml`, `.flake8`, `.golangci.yml`, `.eslintrc.*`).
-- Do not run any commands or tools. Base your assessment on conventions and configs only.
-- When relevant, reference the likely tool/rule in your comments (e.g., Clippy lint name, ESLint rule, mypy error class) and suggest that the author run the project’s own scripts to verify.
-  - Examples to suggest (do not execute): Rust `just fix -p <crate>` / `cargo clippy -p <crate> --tests -D warnings`; JS/TS `npm run lint` and `npm run typecheck`; Python `ruff`/`flake8`/`mypy`; Go `golangci-lint run`/`go vet`; Shell `shellcheck`.
-- Keep guidance scoped to the diff and avoid noisy, repo‑wide advice.
+- Prefer concrete verification using the project’s own checker/linter, scoped ONLY to code touched by the diff. Do not run workspace‑wide checks unless the change is truly cross‑cutting.
+- Acceptable commands (read‑only; do not auto‑fix):
+  - Rust: run `cargo clippy -p <crate> --tests --all-features` and/or `cargo check -p <crate>` for each affected crate. Avoid `--fix` and do not run `just fix` in review.
+  - JS/TS: run `npm run -w <pkg> lint` and `npm run -w <pkg> typecheck` (or the repo’s equivalents).
+  - Python: `ruff .` / `flake8` and `mypy` scoped to changed packages/modules.
+  - Go: `golangci-lint run ./...` or `go vet`, restricted to changed modules.
+  - Shell: `shellcheck <files>`.
+- Record any errors or warnings that overlap the diff. Promote substantive ones (correctness, safety, maintainability) to full findings with precise `code_location`, citing the tool/rule (e.g., Clippy lint name, ESLint rule). For low‑signal items, summarize them under `overall_explanation` rather than adding noisy findings.
+- If a checker cannot run (missing tool or config), state why and proceed with manual review; do not block the review.
+- Keep guidance and reported diagnostics tightly scoped to the diff; avoid generic, repo‑wide advice.
 
 The comments will be presented in the code review as inline comments. You should avoid providing unnecessary location details in the comment body. Always keep the line range as short as possible for interpreting the issue. Avoid ranges longer than 5–10 lines; instead, choose the most suitable subrange that pinpoints the problem.
 

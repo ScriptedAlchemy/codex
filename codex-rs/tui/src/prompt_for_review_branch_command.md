@@ -10,6 +10,14 @@ Procedure:
 - Prioritize in this order: security‑sensitive I/O/auth/crypto; public APIs and error handling; core logic; migrations/scripts/build logic.
 - If you cannot cover everything in one pass, review in batches and present the highest‑impact findings first.
 
+Static checks (run, don’t auto‑fix):
+- Determine affected subprojects from the changed paths and run the project’s checker/linter only for those parts.
+  - Rust: run `cargo clippy -p <crate> --tests --all-features` (no `--fix`) and/or `cargo check -p <crate>` for each affected crate.
+  - JS/TS: run `npm run -w <pkg> lint` and `npm run -w <pkg> typecheck` where applicable.
+  - Python: run `ruff`/`flake8` and `mypy` scoped to changed modules.
+- Record any errors or warnings that overlap the diff. Elevate substantive ones to findings (cite the rule/lint), otherwise summarize them under `overall_explanation` as “Checker/Linter notes”.
+- If a checker cannot run, note the reason and continue with manual review.
+
 Scope filters (skip "junk" files unless there is a direct, non‑speculative impact — and avoid fetching diffs for them):
 - Package manager lockfiles (e.g., `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`).
 - Generated code, vendored bundles, and minified assets.

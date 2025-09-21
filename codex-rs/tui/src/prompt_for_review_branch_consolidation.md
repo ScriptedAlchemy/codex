@@ -12,3 +12,4 @@ Rules:
 - Drop "junk" findings that only concern lockfiles (package manager lock files), generated/minified/vendored assets, or binaries, unless there is a direct and material correctness/security impact.
 - Output ONLY the final JSON object (no prose) following the existing review schema.
 - Sort findings by priority (P0..P3) then confidence (desc) then file/line.
+- If checker/linter diagnostics were collected during batches, fold them in here as findings when they materially impact correctness/maintainability (cite the rule/lint); otherwise, summarize them under `overall_explanation` as “Checker/Linter notes”.
