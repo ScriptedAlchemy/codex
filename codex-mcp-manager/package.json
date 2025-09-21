@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit",
     "clean": "rimraf dist",
     "start": "npm run build && node ./dist/index.js && echo 'MCP Manager started'",
-    "test": "npm run build && timeout 5s tsx test/test-mcp.ts && timeout 5s tsx test/test-direct.ts && tsx test/test-model-config.ts"
+    "test": "npm run build && timeout 5s tsx test/test-mcp.ts && timeout 5s tsx test/test-direct.ts && tsx test/test-model-config.ts && tsx test/test-effort-config.ts"
   },
   "engines": {
     "node": ">=22"

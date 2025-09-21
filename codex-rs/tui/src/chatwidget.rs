@@ -464,8 +464,8 @@ impl ChatWidget {
     fn on_background_event(&mut self, message: String) {
         debug!("BackgroundEvent: {message}");
         // Surface subagent lifecycle events and track active set.
-        if message.starts_with("Subagent ") {
-            if let Some((id, rest)) = message[9..].split_once(' ') {
+        if let Some(stripped) = message.strip_prefix("Subagent ") {
+            if let Some((id, rest)) = stripped.split_once(' ') {
                 if rest.starts_with("opened:") {
                     let desc = rest.trim_start_matches("opened:").trim().to_string();
                     self.subagents.insert(id.to_string(), desc);
@@ -997,19 +997,23 @@ impl ChatWidget {
                                     );
                                     // If large, use orchestrated multi-batch flow.
                                     if (files > 50 || (added + deleted) > 5000)
-                                        && let Ok(orc) =
-                                            crate::review_branch::orchestrator::Orchestrator::new(
-                                                tx.clone(),
-                                                base.clone(),
-                                                reason.clone(),
-                                                25,   // small files cap
-                                                5,    // large files cap
-                                                400,  // large file threshold (changed lines)
-                                                5000, // max lines per batch
-                                                REVIEW_BRANCH_BATCH_PROMPT_TMPL,
-                                                REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL,
-                                            )
-                                            .await
+                                            && let Ok(orc) =
+                                                crate::review_branch::orchestrator::Orchestrator::new(
+                                                    tx.clone(),
+                                                    base.clone(),
+                                                    reason.clone(),
+                                                    crate::review_branch::orchestrator::OrchestratorConfig {
+                                                        chunk_limits: crate::review_branch::chunker::ChunkLimits {
+                                                            small_files_cap: 25,
+                                                            large_files_cap: 5,
+                                                            large_file_threshold_lines: 400,
+                                                            max_lines: 5000,
+                                                        },
+                                                        batch_prompt_tmpl: REVIEW_BRANCH_BATCH_PROMPT_TMPL,
+                                                        consolidation_prompt_tmpl: REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL,
+                                                    },
+                                                )
+                                                .await
                                         && orc.has_batches()
                                     {
                                         tx.send(AppEvent::InsertHistoryCell(Box::new(

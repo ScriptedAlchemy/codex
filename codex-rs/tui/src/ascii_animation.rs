@@ -90,10 +90,6 @@ impl AsciiAnimation {
         true
     }
 
-    pub(crate) fn request_frame(&self) {
-        self.request_frame.schedule_frame();
-    }
-
     fn frames(&self) -> &'static [&'static str] {
         self.variants[self.variant_idx]
     }

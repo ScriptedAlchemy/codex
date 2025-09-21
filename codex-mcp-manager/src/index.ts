@@ -9,7 +9,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { MODEL_CANDIDATES, selectPreferredModel } from "./lib/config.js";
+import {
+  MODEL_CANDIDATES,
+  selectPreferredModel,
+  applyEffortIntoConfig,
+  type Effort,
+} from "./lib/config.js";
 import {
   startArgsShape,
   replyArgsShape,
@@ -347,8 +352,13 @@ function mapCodexArgumentsFromStart(
   if (args.baseInstructions) {
     mapped.baseInstructions = args.baseInstructions;
   }
-  if (args.config) {
-    mapped.config = args.config;
+  // Merge user-provided config, then overlay effort if supplied.
+  mapped.config = args.config ? { ...args.config } : undefined;
+  if (args.effort) {
+    mapped.config = applyEffortIntoConfig(
+      mapped.config,
+      args.effort as Effort,
+    );
   }
   return { mapped, fallbackNotice };
 }
@@ -730,7 +740,7 @@ server.registerResource(
     contents: [
       {
         uri: INFO_RESOURCE_URI,
-        text: `codex-manager bridges Codex's MCP interface with agent-friendly session management.\n\nCapabilities: \n- codex-manager-start: launch a new Codex session with optional overrides, returning a numeric id and streaming events (defaults to the first available preset in ${MODEL_CANDIDATES.join(", ")} unless you override).\n- codex-manager-reply: continue a tracked session by id, forwarding Codex notifications.\n- codex-manager-list: enumerate tracked sessions with metadata (model, rollout path, timestamps).\n- codex-manager-end: indicate work is complete for an id and remove it from tracking.\n\nAgents should store only the numeric session id; codex-manager maintains UUID mapping, event history, and lifecycle coordination on your behalf.`,
+        text: `codex-manager bridges Codex's MCP interface with agent-friendly session management.\n\nCapabilities:\n- codex-manager-start: launch a new Codex session with optional overrides, returning a numeric id and streaming events (defaults to the first available preset in ${MODEL_CANDIDATES.join(", ")} unless you override).\n- codex-manager-reply: continue a tracked session by id, forwarding Codex notifications.\n- codex-manager-list: enumerate tracked sessions with metadata (model, rollout path, timestamps).\n- codex-manager-end: indicate work is complete for an id and remove it from tracking.\n\nModel selection and reasoning effort:\n- model: pass a slug like \"swiftfox-medium\" (recommended for coding) or \"gpt-5\". If omitted, defaults to ${MODEL_CANDIDATES[0]}.\n- effort: optional \"minimal|low|medium|high\". This maps to Codex's \`model_reasoning_effort\` and is the recommended way to control depth of reasoning without changing the model slug.\n  • minimal/low: fastest responses; great for straightforward tasks and quick edits.\n  • medium: balanced default for most coding flows.\n  • high: deeper reasoning for complex changes; expect higher latency and token use.\n\nAgents should store only the numeric session id; codex-manager maintains UUID mapping, event history, and lifecycle coordination on your behalf.`,
       },
     ],
   }),
@@ -740,7 +750,7 @@ server.registerResource(
   START_TOOL_NAME,
   {
     title: "Start Codex Session (Managed ID)",
-    description: `Launch a Codex session using numeric ids that codex-manager keeps in sync with Codex conversation UUIDs. Defaults to model ${DEFAULT_MODEL} (falls back to other GPT-5 presets when needed) unless you pass model explicitly.`,
+    description: `Launch a Codex session using numeric ids that codex-manager keeps in sync with Codex conversation UUIDs. Defaults to model ${DEFAULT_MODEL}. Optional: set effort=minimal|low|medium|high to control reasoning depth (maps to model_reasoning_effort) without changing the model slug. Recommended models: swiftfox-* for coding tasks (aligns with main branch).`,
     inputSchema: startArgsShape as never,
   },
   async (args: StartArgs, extra?: ToolHandlerExtra) => {

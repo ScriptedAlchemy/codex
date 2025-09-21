@@ -173,6 +173,20 @@ pub enum Op {
 
     /// Request to shut down codex instance.
     Shutdown,
+
+    /// Send a direct message to an existing subagent conversation, bypassing
+    /// the parent model. The runtime delivers the message to the child via
+    /// the subagent_reply path and surfaces the reply as an AgentMessage.
+    SubagentDirectMessage {
+        subagent_id: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mode: Option<String>, // "blocking" | "nonblocking" (default blocking)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
 }
 
 /// Determines the conditions under which the user is consulted to approve

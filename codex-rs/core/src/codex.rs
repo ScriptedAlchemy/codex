@@ -53,6 +53,9 @@ use tracing::warn;
 // Subagent role guidance appended to child subagent sessions via user_instructions.
 const SUBAGENT_USER_GUIDE: &str = include_str!("../subagent_prompt.md");
 
+// Type check trigger comment - this file contains the main Codex implementation
+// with all the core functionality for handling conversations, tools, and execution.
+
 use crate::ModelProviderInfo;
 use crate::apply_patch;
 use crate::apply_patch::ApplyPatchExec;
@@ -3405,11 +3408,10 @@ impl Session {
                         EventMsg::AgentMessage(ev) => {
                             reply_text.push_str(&ev.message);
                         }
-                        EventMsg::TokenCount(TokenCountEvent { info }) => {
-                            if let Some(info) = info {
-                                last_usage = Some(info.last_token_usage);
-                            }
+                        EventMsg::TokenCount(TokenCountEvent { info: Some(info) }) => {
+                            last_usage = Some(info.last_token_usage);
                         }
+                        EventMsg::TokenCount(TokenCountEvent { info: None }) => {}
                         EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
                             if let Some(full) = last_agent_message
                                 && !full.is_empty()

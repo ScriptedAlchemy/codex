@@ -4,6 +4,9 @@ export const startArgsShape = {
   prompt: z.string().min(1, "prompt is required"),
   approvalPolicy: z.enum(["untrusted", "on-failure", "never"]).optional(),
   model: z.string().optional(),
+  // Reasoning effort level for GPT‑5 families. This is mapped to
+  // Codex's `model_reasoning_effort` config override under the hood.
+  effort: z.enum(["minimal", "low", "medium", "high"]).optional(),
   sandbox: z
     .enum(["read-only", "workspace-write", "danger-full-access"])
     .optional(),

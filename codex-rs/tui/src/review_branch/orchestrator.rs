@@ -10,6 +10,13 @@ use crate::review_branch::chunker::ChunkLimits;
 use crate::review_branch::chunker::collect_branch_numstat;
 use crate::review_branch::chunker::score_and_chunk;
 
+#[derive(Debug)]
+pub(crate) struct OrchestratorConfig {
+    pub chunk_limits: ChunkLimits,
+    pub batch_prompt_tmpl: &'static str,
+    pub consolidation_prompt_tmpl: &'static str,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Stage {
     Batching,
@@ -35,21 +42,10 @@ impl Orchestrator {
         tx: AppEventSender,
         base: String,
         reason: String,
-        small_files_cap: usize,
-        large_files_cap: usize,
-        large_file_threshold_lines: usize,
-        max_lines: usize,
-        batch_prompt_tmpl: &'static str,
-        consolidation_prompt_tmpl: &'static str,
+        config: OrchestratorConfig,
     ) -> anyhow::Result<Self> {
         let rows = collect_branch_numstat(&base).await.unwrap_or_default();
-        let limits = ChunkLimits {
-            small_files_cap,
-            large_files_cap,
-            large_file_threshold_lines,
-            max_lines,
-        };
-        let batches = score_and_chunk(rows, limits);
+        let batches = score_and_chunk(rows, config.chunk_limits.clone());
         Ok(Self {
             tx,
             base,
@@ -58,8 +54,8 @@ impl Orchestrator {
             idx: 0,
             acc: Vec::new(),
             stage: Stage::Batching,
-            batch_prompt_tmpl,
-            consolidation_prompt_tmpl,
+            batch_prompt_tmpl: config.batch_prompt_tmpl,
+            consolidation_prompt_tmpl: config.consolidation_prompt_tmpl,
         })
     }
 
@@ -253,6 +249,16 @@ mod tests {
         };
         let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
+        let config = OrchestratorConfig {
+            chunk_limits: ChunkLimits {
+                small_files_cap: 10,
+                large_files_cap: 5,
+                large_file_threshold_lines: 100,
+                max_lines: 1000,
+            },
+            batch_prompt_tmpl: "{base} {batch_index}/{batch_total} {size_hint} {file_list}",
+            consolidation_prompt_tmpl: "{base} {stats} {clusters}",
+        };
         let mut orc = Orchestrator {
             base: "origin/main".to_string(),
             reason: "PR base: main".to_string(),
@@ -261,8 +267,8 @@ mod tests {
             acc: Vec::new(),
             stage: Stage::Batching,
             tx,
-            batch_prompt_tmpl: "{base} {batch_index}/{batch_total} {size_hint} {file_list}",
-            consolidation_prompt_tmpl: "{base} {stats} {clusters}",
+            batch_prompt_tmpl: config.batch_prompt_tmpl,
+            consolidation_prompt_tmpl: config.consolidation_prompt_tmpl,
         };
 
         orc.start();
