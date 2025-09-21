@@ -50,6 +50,9 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
+// Subagent role guidance appended to child subagent sessions via user_instructions.
+const SUBAGENT_USER_GUIDE: &str = include_str!("../subagent_prompt.md");
+
 use crate::ModelProviderInfo;
 use crate::apply_patch;
 use crate::apply_patch::ApplyPatchExec;
@@ -645,6 +648,9 @@ impl Session {
         // ensure the parent's current depth is propagated so the child starts at
         // parent_depth + 1 and respects the global max depth.
         child_config.include_subagent_tool = false;
+        // Ensure subagents always have access to the plan tool so they can
+        // externalize a brief plan before acting.
+        child_config.include_plan_tool = true;
         child_config.base_instructions =
             system_prompt.or_else(|| turn_context.base_instructions.clone());
         child_config.approval_policy = approval_policy.unwrap_or(turn_context.approval_policy);
@@ -671,6 +677,17 @@ impl Session {
                 }
             }
         }
+
+        // Ensure child subagents explicitly receive their role guidance.
+        // Deliver via user_instructions (not base instructions) to keep
+        // model `instructions` stable as tested elsewhere.
+        child_config.user_instructions = Some(match child_config.user_instructions.take() {
+            Some(existing) => format!(
+                "{existing}\n\n--- subagent-guide ---\n\n{}",
+                SUBAGENT_USER_GUIDE
+            ),
+            None => SUBAGENT_USER_GUIDE.to_string(),
+        });
 
         let resolved_cwd = match cwd {
             Some(path) => {
