@@ -157,61 +157,6 @@ impl Orchestrator {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app_event::AppEvent;
-    use crate::app_event_sender::AppEventSender;
-    use tokio::sync::mpsc::unbounded_channel;
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn start_emits_hint_with_reason_and_batch_status() {
-        // Prepare a single tiny batch
-        let batch = Batch {
-            files: vec![crate::review_branch::chunker::NumstatRow {
-                path: "src/lib.rs".into(),
-                added: 10,
-                deleted: 0,
-            }],
-            total_added: 10,
-            total_deleted: 0,
-        };
-        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let mut orc = Orchestrator {
-            base: "origin/main".to_string(),
-            reason: "PR base: main".to_string(),
-            batches: vec![batch],
-            idx: 0,
-            acc: Vec::new(),
-            stage: Stage::Batching,
-            tx,
-            batch_prompt_tmpl: "{base} {batch_index}/{batch_total} {size_hint} {file_list}",
-            consolidation_prompt_tmpl: "{base} {stats} {clusters}",
-        };
-
-        orc.start();
-
-        // Expect a status InsertHistoryCell and a CodexOp Review with reason in hint
-        let mut saw_status = false;
-        let mut saw_review = false;
-        while let Ok(ev) = rx.try_recv() {
-            match ev {
-                AppEvent::InsertHistoryCell(_) => {
-                    saw_status = true;
-                }
-                AppEvent::CodexOp(codex_core::protocol::Op::Review { review_request }) => {
-                    assert!(review_request.user_facing_hint.contains("PR base: main"));
-                    assert!(review_request.user_facing_hint.contains("batch 1/1"));
-                    saw_review = true;
-                }
-                _ => {}
-            }
-        }
-        assert!(saw_status && saw_review);
-    }
-}
-
 /// Build a compact consolidation package to keep token size low.
 fn build_consolidation_package(findings: &[ReviewFinding]) -> (String, String) {
     // Very light clustering: group by file and overlapping ranges (<= 5 lines apart), similar titles (case-insensitive prefix match).
@@ -283,4 +228,59 @@ fn build_consolidation_package(findings: &[ReviewFinding]) -> (String, String) {
         clusters.len()
     );
     (out, stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_event::AppEvent;
+    use crate::app_event_sender::AppEventSender;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn start_emits_hint_with_reason_and_batch_status() {
+        // Prepare a single tiny batch
+        let batch = Batch {
+            files: vec![crate::review_branch::chunker::NumstatRow {
+                path: "src/lib.rs".into(),
+                added: 10,
+                deleted: 0,
+            }],
+            total_added: 10,
+            total_deleted: 0,
+        };
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut orc = Orchestrator {
+            base: "origin/main".to_string(),
+            reason: "PR base: main".to_string(),
+            batches: vec![batch],
+            idx: 0,
+            acc: Vec::new(),
+            stage: Stage::Batching,
+            tx,
+            batch_prompt_tmpl: "{base} {batch_index}/{batch_total} {size_hint} {file_list}",
+            consolidation_prompt_tmpl: "{base} {stats} {clusters}",
+        };
+
+        orc.start();
+
+        // Expect a status InsertHistoryCell and a CodexOp Review with reason in hint
+        let mut saw_status = false;
+        let mut saw_review = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::InsertHistoryCell(_) => {
+                    saw_status = true;
+                }
+                AppEvent::CodexOp(codex_core::protocol::Op::Review { review_request }) => {
+                    assert!(review_request.user_facing_hint.contains("PR base: main"));
+                    assert!(review_request.user_facing_hint.contains("batch 1/1"));
+                    saw_review = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_status && saw_review);
+    }
 }

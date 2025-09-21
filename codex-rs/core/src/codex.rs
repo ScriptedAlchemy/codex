@@ -3090,8 +3090,7 @@ fn maybe_format_untruncated_git_diff(
     }
     // Heuristic: detect `git diff` regardless of full path/extension for git.
     let is_git = params
-        .command
-        .get(0)
+        .command.first()
         .map(|c| {
             let lc = c.to_lowercase();
             lc.ends_with("git") || lc.ends_with("git.exe") || lc.ends_with("git.cmd") || lc == "git"
@@ -3202,11 +3201,10 @@ impl Session {
         if state.running {
             return Err("subagent is already running".to_string());
         }
-        if let Some(max_turns) = state.max_turns {
-            if state.turns_completed >= max_turns {
+        if let Some(max_turns) = state.max_turns
+            && state.turns_completed >= max_turns {
                 return Err("subagent turn limit reached".to_string());
             }
-        }
         state.running = true; // mark busy
         let description = state.description.clone();
         let conversation = state.conversation.clone();
@@ -3288,11 +3286,10 @@ impl Session {
                             }
                         }
                         EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
-                            if let Some(full) = last_agent_message {
-                                if !full.is_empty() {
+                            if let Some(full) = last_agent_message
+                                && !full.is_empty() {
                                     reply_text = full;
                                 }
-                            }
                             // Turn finished normally
                             break;
                         }
@@ -3390,11 +3387,10 @@ impl Session {
                 if only_unread && !mi.unread {
                     continue;
                 }
-                if let Some(ref sid) = subagent_id {
-                    if &mi.subagent_id != sid {
+                if let Some(ref sid) = subagent_id
+                    && &mi.subagent_id != sid {
                         continue;
                     }
-                }
                 let at: chrono::DateTime<chrono::Utc> = mi.timestamp.into();
                 items.push(serde_json::json!({
                     "mail_id": mi.id,
@@ -3420,11 +3416,10 @@ impl Session {
             .get_mut(&mail_id)
             .cloned()
             .ok_or_else(|| format!("unknown mail_id: {mail_id}"))?;
-        if !peek.unwrap_or(false) {
-            if let Some(mi) = guard.items.get_mut(&mail_id) {
+        if !peek.unwrap_or(false)
+            && let Some(mi) = guard.items.get_mut(&mail_id) {
                 mi.unread = false;
             }
-        }
         let at: chrono::DateTime<chrono::Utc> = item.timestamp.into();
         Ok(serde_json::json!({
             "subagent_id": item.subagent_id,
