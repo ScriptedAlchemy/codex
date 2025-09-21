@@ -33,7 +33,6 @@ mod app;
 mod app_backtrack;
 mod app_event;
 mod app_event_sender;
-mod ascii_animation;
 mod bottom_pane;
 mod chatwidget;
 mod citation_regex;
@@ -43,7 +42,6 @@ pub mod custom_terminal;
 mod diff_render;
 mod exec_command;
 mod file_search;
-mod frames;
 mod get_git_diff;
 mod review_branch {
     pub mod chunker;
@@ -392,9 +390,9 @@ async fn run_ratatui_app(
         &cli,
         &config,
         active_profile.as_deref(),
-        internal_storage.gpt_5_codex_model_prompt_seen,
+        internal_storage.swiftfox_model_prompt_seen,
     ) {
-        internal_storage.gpt_5_codex_model_prompt_seen = true;
+        internal_storage.swiftfox_model_prompt_seen = true;
         if let Err(e) = internal_storage.persist().await {
             error!("Failed to persist internal storage: {e:?}");
         }
@@ -536,13 +534,13 @@ fn should_show_model_rollout_prompt(
     cli: &Cli,
     config: &Config,
     active_profile: Option<&str>,
-    gpt_5_codex_model_prompt_seen: bool,
+    swiftfox_model_prompt_seen: bool,
 ) -> bool {
     let login_status = get_login_status(config);
 
     active_profile.is_none()
         && cli.model.is_none()
-        && !gpt_5_codex_model_prompt_seen
+        && !swiftfox_model_prompt_seen
         && config.model_provider.requires_openai_auth
         && matches!(login_status, LoginStatus::AuthMode(AuthMode::ChatGPT))
         && !cli.oss
