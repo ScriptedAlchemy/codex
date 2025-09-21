@@ -671,7 +671,9 @@ impl From<ToolsToml> for Tools {
         Self {
             web_search: tools_toml.web_search,
             view_image: tools_toml.view_image,
-            subagent: tools_toml.subagent,
+            // Default subagent to true when [tools] is present but the key is omitted.
+            // Parent agent has subagents enabled by default; nested agents remain constrained by depth.
+            subagent: Some(tools_toml.subagent.unwrap_or(true)),
         }
     }
 }
@@ -872,7 +874,7 @@ impl Config {
 
         let include_subagent_tool = include_subagent_tool
             .or(cfg.tools.as_ref().and_then(|t| t.subagent))
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         let model = model
             .or(config_profile.model)
@@ -1524,7 +1526,7 @@ model_verbosity = "high"
                 use_experimental_streamable_shell_tool: false,
                 use_experimental_unified_exec_tool: false,
                 include_view_image_tool: true,
-                include_subagent_tool: false,
+                include_subagent_tool: true,
                 active_profile: Some("o3".to_string()),
                 disable_paste_burst: false,
             },
@@ -1583,7 +1585,7 @@ model_verbosity = "high"
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
             include_view_image_tool: true,
-            include_subagent_tool: false,
+            include_subagent_tool: true,
             active_profile: Some("gpt3".to_string()),
             disable_paste_burst: false,
         };
@@ -1657,7 +1659,7 @@ model_verbosity = "high"
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
             include_view_image_tool: true,
-            include_subagent_tool: false,
+            include_subagent_tool: true,
             active_profile: Some("zdr".to_string()),
             disable_paste_burst: false,
         };
@@ -1717,7 +1719,7 @@ model_verbosity = "high"
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
             include_view_image_tool: true,
-            include_subagent_tool: false,
+            include_subagent_tool: true,
             active_profile: Some("gpt5".to_string()),
             disable_paste_burst: false,
         };

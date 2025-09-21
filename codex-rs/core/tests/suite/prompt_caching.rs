@@ -213,10 +213,20 @@ async fn prompt_tools_are_consistent_across_requests() {
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2, "expected two POST requests");
 
-    let expected_instructions: &str = include_str!("../../prompt.md");
+    let expected_instructions = include_str!("../../prompt.md");
     // our internal implementation is responsible for keeping tools in sync
     // with the OpenAI schema, so we just verify the tool presence here
-    let expected_tools_names: &[&str] = &["shell", "update_plan", "apply_patch", "view_image"];
+    let expected_tools_names: &[&str] = &[
+        "shell",
+        "update_plan",
+        "apply_patch",
+        "view_image",
+        "subagent_open",
+        "subagent_reply",
+        "subagent_mailbox",
+        "subagent_read",
+        "subagent_end",
+    ];
     let body0 = requests[0].body_json::<serde_json::Value>().unwrap();
     assert_eq!(
         body0["instructions"],

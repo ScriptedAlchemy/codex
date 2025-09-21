@@ -77,9 +77,23 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
     for name in ["main", "master", "trunk", "develop"] {
         candidates.push(name.to_string());
     }
+    // Also consider all other local branches as potential bases (excluding current).
+    if let Some(cur) = current.as_deref() {
+        if let Ok(locals) = list_local_branches().await {
+            for b in locals {
+                if b != cur {
+                    candidates.push(b);
+                }
+            }
+        }
+    } else if let Ok(locals) = list_local_branches().await {
+        candidates.extend(locals);
+    }
     // Filter to those that actually resolve
     let mut best: Option<(String, usize)> = None; // (ref, head_distance)
-    for cand in candidates {
+    // Deduplicate while preserving order to avoid redundant git calls
+    let mut seen = std::collections::HashSet::new();
+    for cand in candidates.into_iter().filter(|c| seen.insert(c.clone())) {
         if !rev_parse_verify(&cand).await? {
             continue;
         }
@@ -92,13 +106,14 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
                 }
             }
         } else if let Some(fp) = merge_base(&cand).await?
-            && let Some(dist) = rev_list_count(&fp, "HEAD").await? {
-                match best {
-                    None => best = Some((cand.clone(), dist)),
-                    Some((_, d)) if dist < d => best = Some((cand.clone(), dist)),
-                    _ => {}
-                }
+            && let Some(dist) = rev_list_count(&fp, "HEAD").await?
+        {
+            match best {
+                None => best = Some((cand.clone(), dist)),
+                Some((_, d)) if dist < d => best = Some((cand.clone(), dist)),
+                _ => {}
             }
+        }
     }
     if let Some((base, _)) = best {
         let tail_owned = base
@@ -280,6 +295,26 @@ async fn current_branch_name() -> io::Result<Option<String>> {
         Some(name) if !name.is_empty() => Ok(Some(name.to_string())),
         _ => Ok(None),
     }
+}
+
+/// List all local branches (short names).
+async fn list_local_branches() -> io::Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect())
 }
 
 /// Optional: use `gh` to detect PR base ref for current branch.

@@ -342,7 +342,7 @@ fn create_subagent_open_tool() -> OpenAiTool {
     );
 
     OpenAiTool::Function(ResponsesApiTool {
-        name: "subagent.open".to_string(),
+        name: "subagent_open".to_string(),
         description: "Open a child Codex (chatty subagent) dedicated to a single, well‑scoped goal. Prefer several focused subagents over one broad one. The scheduler treats max_runtime_ms as a max idle window, not strict wall time."
             .to_string(),
         strict: false,
@@ -359,7 +359,7 @@ fn create_subagent_reply_tool() -> OpenAiTool {
     properties.insert(
         "subagent_id".to_string(),
         JsonSchema::String {
-            description: Some("Identifier returned by subagent.open.".to_string()),
+            description: Some("Identifier returned by subagent_open.".to_string()),
         },
     );
     properties.insert(
@@ -395,7 +395,7 @@ fn create_subagent_reply_tool() -> OpenAiTool {
     );
 
     OpenAiTool::Function(ResponsesApiTool {
-        name: "subagent.reply".to_string(),
+        name: "subagent_reply".to_string(),
         description: "Send a message to an existing subagent and optionally wait for the reply."
             .to_string(),
         strict: false,
@@ -429,7 +429,7 @@ fn create_subagent_mailbox_tool() -> OpenAiTool {
     );
 
     OpenAiTool::Function(ResponsesApiTool {
-        name: "subagent.mailbox".to_string(),
+        name: "subagent_mailbox".to_string(),
         description: "List pending messages from subagents.".to_string(),
         strict: false,
         parameters: JsonSchema::Object {
@@ -456,7 +456,7 @@ fn create_subagent_read_tool() -> OpenAiTool {
     );
 
     OpenAiTool::Function(ResponsesApiTool {
-        name: "subagent.read".to_string(),
+        name: "subagent_read".to_string(),
         description: "Read the full contents of a subagent message.".to_string(),
         strict: false,
         parameters: JsonSchema::Object {
@@ -472,7 +472,7 @@ fn create_subagent_end_tool() -> OpenAiTool {
     properties.insert(
         "subagent_id".to_string(),
         JsonSchema::String {
-            description: Some("Identifier returned by subagent.open.".to_string()),
+            description: Some("Identifier returned by subagent_open.".to_string()),
         },
     );
     properties.insert(
@@ -493,7 +493,7 @@ fn create_subagent_end_tool() -> OpenAiTool {
     );
 
     OpenAiTool::Function(ResponsesApiTool {
-        name: "subagent.end".to_string(),
+        name: "subagent_end".to_string(),
         description: "Shut down a subagent and optionally archive its transcript.".to_string(),
         strict: false,
         parameters: JsonSchema::Object {
@@ -861,11 +861,11 @@ mod tests {
                 "update_plan",
                 "web_search",
                 "view_image",
-                "subagent.open",
-                "subagent.reply",
-                "subagent.mailbox",
-                "subagent.read",
-                "subagent.end",
+                "subagent_open",
+                "subagent_reply",
+                "subagent_mailbox",
+                "subagent_read",
+                "subagent_end",
             ],
         );
     }

@@ -35,6 +35,7 @@ pub struct Prompt {
 
 impl Prompt {
     pub(crate) fn get_full_instructions<'a>(&'a self, model: &'a ModelFamily) -> Cow<'a, str> {
+        // Base instructions, optionally overridden per-turn
         let base = self
             .base_instructions_override
             .as_deref()
@@ -175,6 +176,9 @@ impl Stream for ResponseStream {
 #[cfg(test)]
 mod tests {
     use crate::model_family::find_family_for_model;
+    use crate::openai_tools::ToolsConfig;
+    use crate::openai_tools::ToolsConfigParams;
+    use crate::openai_tools::get_openai_tools;
     use pretty_assertions::assert_eq;
 
     use super::*;
@@ -233,6 +237,40 @@ mod tests {
             let full = prompt.get_full_instructions(&model_family);
             assert_eq!(full, expected);
         }
+    }
+
+    #[test]
+    fn subagent_instructions_are_not_appended_to_instructions_field() {
+        // Even when subagent tools are present, 'instructions' should remain
+        // base + apply_patch (if applicable). Subagent guidance is delivered via
+        // the user_instructions message instead.
+        let model_family = find_family_for_model("codex-mini-latest").expect("known model slug");
+
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_family: &model_family,
+            include_plan_tool: false,
+            include_apply_patch_tool: false,
+            include_web_search_request: false,
+            use_streamable_shell_tool: false,
+            include_view_image_tool: true,
+            include_subagent_tool: true,
+            experimental_unified_exec_tool: true,
+        });
+        let tools = get_openai_tools(&tools_config, Some(std::collections::HashMap::new()));
+
+        let prompt = Prompt {
+            input: vec![],
+            tools,
+            base_instructions_override: None,
+        };
+
+        let full = prompt.get_full_instructions(&model_family);
+        let expected = format!(
+            "{}\n{}",
+            model_family.clone().base_instructions,
+            APPLY_PATCH_TOOL_INSTRUCTIONS,
+        );
+        assert_eq!(full, expected);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -306,7 +307,7 @@ pub(crate) struct Session {
     mailbox: Mutex<Mailbox>,
     subagent_slots: Arc<Semaphore>,
     subagent_settings: SubagentSettings,
-    subagent_depth: u8,
+    subagent_depth: AtomicU8,
 }
 
 struct SubagentState {
@@ -557,7 +558,7 @@ impl Session {
                 max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
                 max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
             },
-            subagent_depth: 0,
+            subagent_depth: AtomicU8::new(0),
         });
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
@@ -599,9 +600,10 @@ impl Session {
         turn_context: &TurnContext,
         args: SubagentOpenArgs,
     ) -> Result<SubagentOpenResult, String> {
-        if self.subagent_depth >= self.subagent_settings.max_depth {
-            return Err("subagent depth limit reached".to_string());
-        }
+        // Reserve a depth slot up-front to prevent races.
+        // If anything fails later, the reservation is rolled back by Drop.
+        let depth_guard =
+            SubagentDepthReservation::new(&self.subagent_depth, self.subagent_settings.max_depth)?;
 
         let permit = match self.subagent_slots.clone().try_acquire_owned() {
             Ok(permit) => permit,
@@ -638,6 +640,10 @@ impl Session {
         let description = summarize_goal(&goal);
 
         let mut child_config = (*turn_context.client.config()).clone();
+        // Nested subagents are disabled for now. Keep capability for the future by
+        // leaving depth accounting in place. If enabling nested subagents later,
+        // ensure the parent's current depth is propagated so the child starts at
+        // parent_depth + 1 and respects the global max depth.
         child_config.include_subagent_tool = false;
         child_config.base_instructions =
             system_prompt.or_else(|| turn_context.base_instructions.clone());
@@ -717,6 +723,9 @@ impl Session {
                 permit,
             },
         );
+        // Keep the reservation; depth is now owned by this live subagent entry
+        // without leaking the guard.
+        depth_guard.commit();
         drop(subagents);
 
         Ok(SubagentOpenResult {
@@ -1765,7 +1774,6 @@ async fn spawn_review_thread(
         experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
     });
 
-    let base_instructions = REVIEW_PROMPT.to_string();
     let review_prompt = review_request.prompt.clone();
     let provider = parent_turn_context.client.get_provider();
     let auth_manager = parent_turn_context.client.get_auth_manager();
@@ -1795,7 +1803,9 @@ async fn spawn_review_thread(
         client,
         tools_config,
         user_instructions: None,
-        base_instructions: Some(base_instructions.clone()),
+        // Keep the model's standard base instructions so providers that
+        // validate `instructions` against a known template accept review mode.
+        base_instructions: None,
         approval_policy: parent_turn_context.approval_policy,
         sandbox_policy: parent_turn_context.sandbox_policy.clone(),
         shell_environment_policy: parent_turn_context.shell_environment_policy.clone(),
@@ -1803,9 +1813,11 @@ async fn spawn_review_thread(
         is_review_mode: true,
     };
 
-    // Seed the child task with the review prompt as the initial user message.
+    // Seed the child task with review guidelines in the first user message so
+    // the reviewer knows how to produce structured findings, while keeping the
+    // model's `instructions` field unchanged (provider‑approved base prompt).
     let input: Vec<InputItem> = vec![InputItem::Text {
-        text: format!("{base_instructions}\n\n---\n\nNow, here's your task: {review_prompt}"),
+        text: format!("{REVIEW_PROMPT}\n\n---\n\nNow, here's your task: {review_prompt}"),
     }];
     let tc = Arc::new(review_turn_context);
 
@@ -2825,14 +2837,14 @@ async fn handle_custom_tool_call(
 ) -> ResponseInputItem {
     info!("CustomToolCall: {name} {input}");
     match name.as_str() {
-        "subagent.open" => {
+        "subagent_open" => {
             let args = match serde_json::from_str::<SubagentOpenArgs>(&input) {
                 Ok(args) => args,
                 Err(err) => {
                     return ResponseInputItem::CustomToolCallOutput {
                         call_id,
                         output: serde_json::json!({
-                            "error": format!("failed to parse subagent.open arguments: {err}")
+                            "error": format!("failed to parse subagent_open arguments: {err}")
                         })
                         .to_string(),
                     };
@@ -2856,14 +2868,14 @@ async fn handle_custom_tool_call(
                 },
             }
         }
-        "subagent.reply" => {
+        "subagent_reply" => {
             let args = match serde_json::from_str::<SubagentReplyArgs>(&input) {
                 Ok(args) => args,
                 Err(err) => {
                     return ResponseInputItem::CustomToolCallOutput {
                         call_id,
                         output: serde_json::json!({
-                            "error": format!("failed to parse subagent.reply arguments: {err}")
+                            "error": format!("failed to parse subagent_reply arguments: {err}")
                         })
                         .to_string(),
                     };
@@ -2893,14 +2905,14 @@ async fn handle_custom_tool_call(
                 },
             }
         }
-        "subagent.mailbox" => {
+        "subagent_mailbox" => {
             let args = match serde_json::from_str::<SubagentMailboxArgs>(&input) {
                 Ok(args) => args,
                 Err(err) => {
                     return ResponseInputItem::CustomToolCallOutput {
                         call_id,
                         output: serde_json::json!({
-                            "error": format!("failed to parse subagent.mailbox arguments: {err}")
+                            "error": format!("failed to parse subagent_mailbox arguments: {err}")
                         })
                         .to_string(),
                     };
@@ -2913,14 +2925,14 @@ async fn handle_custom_tool_call(
                 output: out.to_string(),
             }
         }
-        "subagent.read" => {
+        "subagent_read" => {
             let args = match serde_json::from_str::<SubagentReadArgs>(&input) {
                 Ok(args) => args,
                 Err(err) => {
                     return ResponseInputItem::CustomToolCallOutput {
                         call_id,
                         output: serde_json::json!({
-                            "error": format!("failed to parse subagent.read arguments: {err}")
+                            "error": format!("failed to parse subagent_read arguments: {err}")
                         })
                         .to_string(),
                     };
@@ -2937,14 +2949,14 @@ async fn handle_custom_tool_call(
                 },
             }
         }
-        "subagent.end" => {
+        "subagent_end" => {
             let args = match serde_json::from_str::<SubagentEndArgs>(&input) {
                 Ok(args) => args,
                 Err(err) => {
                     return ResponseInputItem::CustomToolCallOutput {
                         call_id,
                         output: serde_json::json!({
-                            "error": format!("failed to parse subagent.end arguments: {err}")
+                            "error": format!("failed to parse subagent_end arguments: {err}")
                         })
                         .to_string(),
                     };
@@ -3021,6 +3033,7 @@ struct SubagentOpenArgs {
     max_runtime_ms: Option<u64>,
 }
 
+#[derive(Debug)]
 struct SubagentOpenResult {
     subagent_id: String,
     conversation_id: ConversationId,
@@ -3090,7 +3103,8 @@ fn maybe_format_untruncated_git_diff(
     }
     // Heuristic: detect `git diff` regardless of full path/extension for git.
     let is_git = params
-        .command.first()
+        .command
+        .first()
         .map(|c| {
             let lc = c.to_lowercase();
             lc.ends_with("git") || lc.ends_with("git.exe") || lc.ends_with("git.cmd") || lc == "git"
@@ -3202,9 +3216,10 @@ impl Session {
             return Err("subagent is already running".to_string());
         }
         if let Some(max_turns) = state.max_turns
-            && state.turns_completed >= max_turns {
-                return Err("subagent turn limit reached".to_string());
-            }
+            && state.turns_completed >= max_turns
+        {
+            return Err("subagent turn limit reached".to_string());
+        }
         state.running = true; // mark busy
         let description = state.description.clone();
         let conversation = state.conversation.clone();
@@ -3239,14 +3254,16 @@ impl Session {
                 // Compute remaining idle budget from last_active
                 let (remaining, timed_out) = {
                     let mut sub_map = self.subagents.lock().await;
-                    let st = sub_map
-                        .get_mut(subagent_id)
-                        .expect("subagent present during run");
-                    let since = st.last_active.elapsed();
-                    if since >= max_idle {
-                        (Duration::from_millis(0), true)
+                    if let Some(st) = sub_map.get_mut(subagent_id) {
+                        let since = st.last_active.elapsed();
+                        if since >= max_idle {
+                            (Duration::from_millis(0), true)
+                        } else {
+                            (max_idle - since, false)
+                        }
                     } else {
-                        (max_idle - since, false)
+                        // Subagent not found, consider it expired
+                        (Duration::from_millis(0), true)
                     }
                 };
                 if timed_out || remaining.is_zero() {
@@ -3287,9 +3304,10 @@ impl Session {
                         }
                         EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
                             if let Some(full) = last_agent_message
-                                && !full.is_empty() {
-                                    reply_text = full;
-                                }
+                                && !full.is_empty()
+                            {
+                                reply_text = full;
+                            }
                             // Turn finished normally
                             break;
                         }
@@ -3388,9 +3406,10 @@ impl Session {
                     continue;
                 }
                 if let Some(ref sid) = subagent_id
-                    && &mi.subagent_id != sid {
-                        continue;
-                    }
+                    && &mi.subagent_id != sid
+                {
+                    continue;
+                }
                 let at: chrono::DateTime<chrono::Utc> = mi.timestamp.into();
                 items.push(serde_json::json!({
                     "mail_id": mi.id,
@@ -3417,9 +3436,10 @@ impl Session {
             .cloned()
             .ok_or_else(|| format!("unknown mail_id: {mail_id}"))?;
         if !peek.unwrap_or(false)
-            && let Some(mi) = guard.items.get_mut(&mail_id) {
-                mi.unread = false;
-            }
+            && let Some(mi) = guard.items.get_mut(&mail_id)
+        {
+            mi.unread = false;
+        }
         let at: chrono::DateTime<chrono::Utc> = item.timestamp.into();
         Ok(serde_json::json!({
             "subagent_id": item.subagent_id,
@@ -3443,6 +3463,12 @@ impl Session {
             let Some(state) = map.remove(&subagent_id) else {
                 return Err(format!("unknown subagent_id: {subagent_id}"));
             };
+            // Decrease current depth when a subagent is ended
+            let _ = self
+                .subagent_depth
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                    Some(v.saturating_sub(1))
+                });
             (
                 state.conversation,
                 state.conversation_id,
@@ -4154,6 +4180,44 @@ async fn exit_review_mode(
 
 #[cfg(test)]
 pub(crate) use tests::make_session_and_context;
+/// RAII guard that reserves one unit of subagent depth. If dropped while
+/// still armed, it decrements the counter to roll back the reservation.
+struct SubagentDepthReservation<'a> {
+    depth: &'a AtomicU8,
+    armed: bool,
+}
+
+impl<'a> SubagentDepthReservation<'a> {
+    fn new(depth: &'a AtomicU8, max_depth: u8) -> Result<Self, String> {
+        // Attempt an atomic increment only if below max_depth.
+        match depth.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            if v < max_depth {
+                Some(v.saturating_add(1))
+            } else {
+                None
+            }
+        }) {
+            Ok(_prev) => Ok(Self { depth, armed: true }),
+            Err(_cur) => Err("subagent depth limit reached".to_string()),
+        }
+    }
+
+    fn commit(mut self) {
+        self.armed = false;
+    }
+}
+
+impl<'a> Drop for SubagentDepthReservation<'a> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self
+                .depth
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                    Some(v.saturating_sub(1))
+                });
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -4172,6 +4236,84 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration as StdDuration;
+
+    #[test]
+    fn subagent_depth_limit_blocks_second_until_end() {
+        let (mut session, turn_context) = make_session_and_context();
+
+        // Enforce depth=1: allow one open, block the second until the first ends.
+        session.subagent_settings.max_depth = 1;
+
+        let args1 = SubagentOpenArgs {
+            goal: "first".to_string(),
+            system_prompt: None,
+            model: None,
+            approval_policy: None,
+            sandbox_mode: None,
+            cwd: None,
+            max_turns: None,
+            max_runtime_ms: None,
+        };
+
+        let open1 = tokio_test::block_on(session.open_subagent(&turn_context, args1))
+            .expect("first subagent should open at depth 0");
+
+        let args2 = SubagentOpenArgs {
+            goal: "second".to_string(),
+            system_prompt: None,
+            model: None,
+            approval_policy: None,
+            sandbox_mode: None,
+            cwd: None,
+            max_turns: None,
+            max_runtime_ms: None,
+        };
+        let err2 = tokio_test::block_on(session.open_subagent(&turn_context, args2))
+            .expect_err("second subagent should be blocked by depth limit");
+        assert!(err2.contains("subagent depth limit"), "{err2}");
+
+        // End the first and verify we can open again.
+        let _ = tokio_test::block_on(session.end_subagent(SubagentEndArgs {
+            subagent_id: open1.subagent_id,
+            persist: Some(false),
+            archive_to: None,
+        }))
+        .expect("end_subagent should succeed");
+
+        let args3 = SubagentOpenArgs {
+            goal: "third".to_string(),
+            system_prompt: None,
+            model: None,
+            approval_policy: None,
+            sandbox_mode: None,
+            cwd: None,
+            max_turns: None,
+            max_runtime_ms: None,
+        };
+        let _open3 = tokio_test::block_on(session.open_subagent(&turn_context, args3))
+            .expect("should open after depth decremented");
+    }
+
+    #[test]
+    fn subagent_depth_limit_zero_disallows_open() {
+        let (mut session, turn_context) = make_session_and_context();
+        // Disallow any subagent
+        session.subagent_settings.max_depth = 0;
+
+        let args = SubagentOpenArgs {
+            goal: "nope".to_string(),
+            system_prompt: None,
+            model: None,
+            approval_policy: None,
+            sandbox_mode: None,
+            cwd: None,
+            max_turns: None,
+            max_runtime_ms: None,
+        };
+        let err = tokio_test::block_on(session.open_subagent(&turn_context, args))
+            .expect_err("should fail when max_depth=0");
+        assert!(err.contains("subagent depth limit"), "{err}");
+    }
 
     #[test]
     fn reconstruct_history_matches_live_compactions() {
@@ -4462,7 +4604,7 @@ mod tests {
                 max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
                 max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
             },
-            subagent_depth: 0,
+            subagent_depth: AtomicU8::new(0),
         };
         (session, turn_context)
     }

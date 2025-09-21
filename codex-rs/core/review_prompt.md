@@ -43,6 +43,14 @@ GUIDELINES:
 - In every ```suggestion block, preserve the exact leading whitespace of the replaced lines (spaces vs tabs, number of spaces).
 - Do NOT introduce or remove outer indentation levels unless that is the actual fix.
 
+LINTERS AND TYPE CHECKERS:
+
+- Infer whether this repo or the modified subproject uses a linter or type checker by inspecting configuration and script files (e.g., `Cargo.toml`, `package.json`, `tsconfig.json`, `ruff.toml`, `.flake8`, `.golangci.yml`, `.eslintrc.*`).
+- Do not run any commands or tools. Base your assessment on conventions and configs only.
+- When relevant, reference the likely tool/rule in your comments (e.g., Clippy lint name, ESLint rule, mypy error class) and suggest that the author run the project’s own scripts to verify.
+  - Examples to suggest (do not execute): Rust `just fix -p <crate>` / `cargo clippy -p <crate> --tests -D warnings`; JS/TS `npm run lint` and `npm run typecheck`; Python `ruff`/`flake8`/`mypy`; Go `golangci-lint run`/`go vet`; Shell `shellcheck`.
+- Keep guidance scoped to the diff and avoid noisy, repo‑wide advice.
+
 The comments will be presented in the code review as inline comments. You should avoid providing unnecessary location details in the comment body. Always keep the line range as short as possible for interpreting the issue. Avoid ranges longer than 5–10 lines; instead, choose the most suitable subrange that pinpoints the problem.
 
 At the beginning of the finding title, tag the bug with priority level. For example "[P1] Un-padding slices along wrong tensor dimensions". [P0] – Drop everything to fix.  Blocking release, operations, or major usage. Only use for universal issues that do not depend on any assumptions about the inputs. · [P1] – Urgent. Should be addressed in the next cycle · [P2] – Normal. To be fixed eventually · [P3] – Low. Nice to have.
