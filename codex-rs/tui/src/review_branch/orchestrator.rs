@@ -63,6 +63,7 @@ impl Orchestrator {
         })
     }
 
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.stage != Stage::Done
     }
@@ -160,6 +161,7 @@ impl Orchestrator {
 /// Build a compact consolidation package to keep token size low.
 fn build_consolidation_package(findings: &[ReviewFinding]) -> (String, String) {
     // Very light clustering: group by file and overlapping ranges (<= 5 lines apart), similar titles (case-insensitive prefix match).
+    #[allow(dead_code)]
     #[derive(Clone)]
     struct Key<'a> {
         path: &'a str,

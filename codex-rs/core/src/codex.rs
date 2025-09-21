@@ -318,13 +318,15 @@ struct SubagentState {
     conversation_id: ConversationId,
     rollout_path: PathBuf,
     description: String,
-    created_at: Instant,
+    // Keep for future UI/debugging; not read directly.
+    _created_at: Instant,
     last_active: Instant,
     turns_completed: usize,
     running: bool,
     max_turns: Option<usize>,
     max_runtime: Option<Duration>,
-    permit: OwnedSemaphorePermit,
+    // Hold semaphore permit to enforce concurrency until drop.
+    _permit: OwnedSemaphorePermit,
 }
 
 #[derive(Default)]
@@ -350,7 +352,8 @@ struct MailItem {
 #[derive(Clone, Copy)]
 struct SubagentSettings {
     max_depth: u8,
-    max_concurrent: usize,
+    // Currently enforced via `subagent_slots`; keep config value for future tweaks.
+    _max_concurrent: usize,
 }
 
 /// The context needed for a single turn of the conversation.
@@ -559,7 +562,7 @@ impl Session {
             subagent_slots: Arc::new(Semaphore::new(DEFAULT_MAX_SUBAGENT_CONCURRENT)),
             subagent_settings: SubagentSettings {
                 max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
-                max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
+                _max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
             },
             subagent_depth: AtomicU8::new(0),
         });
@@ -731,13 +734,13 @@ impl Session {
                 conversation_id,
                 rollout_path: rollout_path.clone(),
                 description: description.clone(),
-                created_at: Instant::now(),
+                _created_at: Instant::now(),
                 last_active: Instant::now(),
                 turns_completed: 0,
                 running: false,
                 max_turns,
                 max_runtime,
-                permit,
+                _permit: permit,
             },
         );
         // Keep the reservation; depth is now owned by this live subagent entry
@@ -1760,6 +1763,58 @@ async fn submission_loop(
                     review_request,
                 )
                 .await;
+            }
+            Op::SubagentDirectMessage {
+                subagent_id,
+                message,
+                images,
+                mode,
+                timeout_ms,
+            } => {
+                let args = SubagentReplyArgs {
+                    subagent_id: subagent_id.clone(),
+                    message: message.clone(),
+                    images,
+                    mode,
+                    timeout_ms,
+                };
+
+                // Default to blocking behavior to simplify UI expectations.
+                let sess_clone = sess.clone();
+                let sub_id_clone = sub.id.clone();
+                tokio::spawn(async move {
+                    use crate::protocol::AgentMessageEvent;
+                    match sess_clone.subagent_reply_blocking(&args).await {
+                        Ok(val) => {
+                            // Expect a JSON object with a "reply" string.
+                            let reply = val
+                                .get("reply")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if !reply.is_empty() {
+                                let event = Event {
+                                    id: sub_id_clone.clone(),
+                                    msg: EventMsg::AgentMessage(AgentMessageEvent {
+                                        message: format!("Subagent {subagent_id}: {reply}"),
+                                    }),
+                                };
+                                sess_clone.send_event(event).await;
+                            }
+                        }
+                        Err(err) => {
+                            let event = Event {
+                                id: sub_id_clone.clone(),
+                                msg: EventMsg::Error(ErrorEvent {
+                                    message: format!(
+                                        "subagent {subagent_id} direct message failed: {err}"
+                                    ),
+                                }),
+                            };
+                            sess_clone.send_event(event).await;
+                        }
+                    }
+                });
             }
             _ => {
                 // Ignore unknown ops; enum is non_exhaustive to allow extensions.
@@ -2869,16 +2924,28 @@ async fn handle_custom_tool_call(
             };
 
             match sess.open_subagent(turn_context, args).await {
-                Ok(result) => ResponseInputItem::CustomToolCallOutput {
-                    call_id,
-                    output: serde_json::json!({
-                        "subagent_id": result.subagent_id,
-                        "conversation_id": result.conversation_id,
-                        "rollout_path": result.rollout_path,
-                        "description": result.description,
-                    })
-                    .to_string(),
-                },
+                Ok(result) => {
+                    // Surface subagent creation to the UI so users can see activity.
+                    let _ = sess
+                        .notify_background_event(
+                            &sub_id,
+                            format!(
+                                "Subagent {} opened: {}",
+                                result.subagent_id, result.description
+                            ),
+                        )
+                        .await;
+                    ResponseInputItem::CustomToolCallOutput {
+                        call_id,
+                        output: serde_json::json!({
+                            "subagent_id": result.subagent_id,
+                            "conversation_id": result.conversation_id,
+                            "rollout_path": result.rollout_path,
+                            "description": result.description,
+                        })
+                        .to_string(),
+                    }
+                }
                 Err(err) => ResponseInputItem::CustomToolCallOutput {
                     call_id,
                     output: serde_json::json!({ "error": err }).to_string(),
@@ -2979,11 +3046,21 @@ async fn handle_custom_tool_call(
                     };
                 }
             };
+            let subagent_id_for_msg = args.subagent_id.clone();
             match sess.end_subagent(args).await {
-                Ok(val) => ResponseInputItem::CustomToolCallOutput {
-                    call_id,
-                    output: val.to_string(),
-                },
+                Ok(val) => {
+                    // Inform UI that this subagent ended; helps list active subagents.
+                    let _ = sess
+                        .notify_background_event(
+                            &sub_id,
+                            format!("Subagent {} ended", subagent_id_for_msg),
+                        )
+                        .await;
+                    ResponseInputItem::CustomToolCallOutput {
+                        call_id,
+                        output: val.to_string(),
+                    }
+                }
                 Err(err) => ResponseInputItem::CustomToolCallOutput {
                     call_id,
                     output: serde_json::json!({ "error": err }).to_string(),
@@ -3067,6 +3144,7 @@ struct SubagentReplyArgs {
     #[serde(default)]
     mode: Option<String>, // "blocking" | "nonblocking" (default blocking)
     #[serde(default)]
+    #[allow(dead_code)]
     timeout_ms: Option<u64>,
 }
 
@@ -4255,6 +4333,143 @@ mod tests {
     use std::time::Duration as StdDuration;
 
     #[test]
+    fn subagent_tool_calls_emit_background_events() {
+        // Build a session with a readable event receiver so we can assert on BackgroundEvent.
+        let (tx_event, rx_event) = async_channel::unbounded();
+
+        let codex_home = tempfile::tempdir().expect("tempdir");
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )
+        .expect("load default config");
+        let config = Arc::new(config);
+
+        let conversation_id = ConversationId::default();
+        let client = ModelClient::new(
+            config.clone(),
+            None,
+            config.model_provider.clone(),
+            config.model_reasoning_effort,
+            config.model_reasoning_summary,
+            conversation_id,
+        );
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_family: &config.model_family,
+            include_plan_tool: config.include_plan_tool,
+            include_apply_patch_tool: config.include_apply_patch_tool,
+            include_web_search_request: config.tools_web_search_request,
+            use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
+            include_view_image_tool: config.include_view_image_tool,
+            include_subagent_tool: config.include_subagent_tool,
+            experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
+        });
+
+        let turn_context = TurnContext {
+            client,
+            cwd: config.cwd.clone(),
+            base_instructions: config.base_instructions.clone(),
+            user_instructions: config.user_instructions.clone(),
+            approval_policy: config.approval_policy,
+            sandbox_policy: config.sandbox_policy.clone(),
+            shell_environment_policy: config.shell_environment_policy.clone(),
+            tools_config,
+            is_review_mode: false,
+        };
+
+        let sess = Arc::new(Session {
+            conversation_id,
+            tx_event,
+            mcp_connection_manager: McpConnectionManager::default(),
+            session_manager: ExecSessionManager::default(),
+            unified_exec_manager: UnifiedExecSessionManager::default(),
+            auth_manager: crate::AuthManager::from_auth_for_testing(
+                crate::CodexAuth::from_api_key("dummy"),
+            ),
+            notify: None,
+            rollout: Mutex::new(None),
+            state: Mutex::new(State {
+                history: ConversationHistory::new(),
+                ..Default::default()
+            }),
+            codex_linux_sandbox_exe: None,
+            user_shell: shell::Shell::Unknown,
+            show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            next_internal_sub_id: AtomicU64::new(0),
+            subagents: Mutex::new(HashMap::new()),
+            mailbox: Mutex::new(Mailbox::default()),
+            subagent_slots: Arc::new(Semaphore::new(DEFAULT_MAX_SUBAGENT_CONCURRENT)),
+            subagent_settings: SubagentSettings {
+                max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
+                _max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
+            },
+            subagent_depth: AtomicU8::new(0),
+        });
+
+        // Open a subagent through the tool-call path to trigger a BackgroundEvent.
+        let mut tracker = crate::turn_diff_tracker::TurnDiffTracker::new();
+        let open_args = json!({ "goal": "test open" });
+        let res = tokio_test::block_on(handle_custom_tool_call(
+            sess.clone(),
+            &turn_context,
+            &mut tracker,
+            "p1".to_string(),
+            "subagent_open".to_string(),
+            open_args.to_string(),
+            "c-open".to_string(),
+        ));
+
+        // Expect a background event announcing the subagent
+        let ev = tokio_test::block_on(rx_event.recv());
+        match ev {
+            Ok(Event {
+                msg: EventMsg::BackgroundEvent(be),
+                ..
+            }) => {
+                assert!(be.message.starts_with("Subagent "));
+                assert!(be.message.contains("opened"));
+            }
+            other => panic!("expected BackgroundEvent, got {other:?}"),
+        }
+
+        // Parse subagent_id from the tool-call output
+        let subagent_id = match res {
+            ResponseInputItem::CustomToolCallOutput { output, .. } => {
+                let v: serde_json::Value = serde_json::from_str(&output).expect("json");
+                v.get("subagent_id")
+                    .and_then(|s| s.as_str())
+                    .expect("subagent_id")
+                    .to_string()
+            }
+            other => panic!("unexpected output variant: {other:?}"),
+        };
+
+        // End the subagent through the tool-call path and expect a second BackgroundEvent.
+        let end_args = json!({ "subagent_id": subagent_id, "persist": false });
+        let _ = tokio_test::block_on(handle_custom_tool_call(
+            sess,
+            &turn_context,
+            &mut tracker,
+            "p1".to_string(),
+            "subagent_end".to_string(),
+            end_args.to_string(),
+            "c-end".to_string(),
+        ));
+
+        let ev2 = tokio_test::block_on(rx_event.recv());
+        match ev2 {
+            Ok(Event {
+                msg: EventMsg::BackgroundEvent(be),
+                ..
+            }) => {
+                assert!(be.message.contains("ended"), "{be:?}");
+            }
+            other => panic!("expected BackgroundEvent end, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn subagent_depth_limit_blocks_second_until_end() {
         let (mut session, turn_context) = make_session_and_context();
 
@@ -4619,7 +4834,7 @@ mod tests {
             subagent_slots: Arc::new(Semaphore::new(DEFAULT_MAX_SUBAGENT_CONCURRENT)),
             subagent_settings: SubagentSettings {
                 max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
-                max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
+                _max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
             },
             subagent_depth: AtomicU8::new(0),
         };

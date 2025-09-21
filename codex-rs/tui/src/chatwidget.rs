@@ -161,6 +161,9 @@ pub(crate) struct ChatWidget {
     suppress_next_review_render: bool,
     // Cached TUI notifications policy (derived from config.toml at startup)
     tui_notifications: TuiNotifications,
+    // Subagent focus and registry
+    focused_subagent: Option<String>,
+    subagents: std::collections::BTreeMap<String, String>, // id -> description
 }
 
 struct UserMessage {
@@ -460,6 +463,22 @@ impl ChatWidget {
 
     fn on_background_event(&mut self, message: String) {
         debug!("BackgroundEvent: {message}");
+        // Surface subagent lifecycle events and track active set.
+        if message.starts_with("Subagent ") {
+            if let Some((id, rest)) = message[9..].split_once(' ') {
+                if rest.starts_with("opened:") {
+                    let desc = rest.trim_start_matches("opened:").trim().to_string();
+                    self.subagents.insert(id.to_string(), desc);
+                } else if rest.starts_with("ended") {
+                    self.subagents.remove(id);
+                    if self.focused_subagent.as_deref() == Some(id) {
+                        self.focused_subagent = None;
+                    }
+                }
+            }
+            self.add_to_history(history_cell::new_subagent_event(message));
+            self.request_redraw();
+        }
     }
 
     fn on_stream_error(&mut self, message: String) {
@@ -738,6 +757,8 @@ impl ChatWidget {
             review_orchestrator: None,
             suppress_next_review_render: false,
             tui_notifications,
+            focused_subagent: None,
+            subagents: std::collections::BTreeMap::new(),
         }
     }
 
@@ -799,6 +820,8 @@ impl ChatWidget {
             review_orchestrator: None,
             suppress_next_review_render: false,
             tui_notifications,
+            focused_subagent: None,
+            subagents: std::collections::BTreeMap::new(),
         }
     }
 
@@ -819,6 +842,15 @@ impl ChatWidget {
                 ..
             } => {
                 self.on_ctrl_c();
+                return;
+            }
+            KeyEvent {
+                code: KeyCode::Char('o'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                self.cycle_subagent_focus();
                 return;
             }
             KeyEvent {
@@ -874,6 +906,24 @@ impl ChatWidget {
                 }
             }
         }
+    }
+
+    fn cycle_subagent_focus(&mut self) {
+        // Ordered list: parent (None) + active subagent ids sorted
+        let mut ids: Vec<Option<String>> = vec![None];
+        ids.extend(self.subagents.keys().cloned().map(Some));
+        let cur_idx = ids
+            .iter()
+            .position(|v| v.as_ref() == self.focused_subagent.as_ref())
+            .unwrap_or(0);
+        let next_idx = (cur_idx + 1) % ids.len().max(1);
+        self.focused_subagent = ids[next_idx].clone();
+        let banner = match self.focused_subagent.as_deref() {
+            Some(id) => format!("Focus: subagent {id}"),
+            None => "Focus: parent".to_string(),
+        };
+        self.add_to_history(history_cell::new_subagent_event(banner));
+        self.request_redraw();
     }
 
     pub(crate) fn attach_image(
@@ -1126,19 +1176,47 @@ impl ChatWidget {
             items.push(InputItem::Text { text: text.clone() });
         }
 
-        for path in image_paths {
-            items.push(InputItem::LocalImage { path });
+        for path in &image_paths {
+            items.push(InputItem::LocalImage {
+                path: path.to_path_buf(),
+            });
         }
 
         if items.is_empty() {
             return;
         }
 
-        self.codex_op_tx
-            .send(Op::UserInput { items })
-            .unwrap_or_else(|e| {
-                tracing::error!("failed to send message: {e}");
-            });
+        if let Some(sub_id) = self.focused_subagent.clone() {
+            self.codex_op_tx
+                .send(Op::SubagentDirectMessage {
+                    subagent_id: sub_id.clone(),
+                    message: text.clone(),
+                    images: if image_paths.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            image_paths
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect(),
+                        )
+                    },
+                    mode: Some("blocking".to_string()),
+                    timeout_ms: None,
+                })
+                .unwrap_or_else(|e| tracing::error!("failed to send subagent message: {e}"));
+            if !text.is_empty() {
+                self.add_to_history(history_cell::new_subagent_event(format!(
+                    "To subagent {sub_id}: {text}"
+                )));
+            }
+        } else {
+            self.codex_op_tx
+                .send(Op::UserInput { items })
+                .unwrap_or_else(|e| {
+                    tracing::error!("failed to send message: {e}");
+                });
+        }
 
         // Persist the text to cross-session message history.
         if !text.is_empty() {
@@ -1150,7 +1228,7 @@ impl ChatWidget {
         }
 
         // Only show the text portion in conversation history.
-        if !text.is_empty() {
+        if !text.is_empty() && self.focused_subagent.is_none() {
             self.add_to_history(history_cell::new_user_prompt(text));
         }
     }
@@ -1778,3 +1856,6 @@ fn extract_first_bold(s: &str) -> Option<String> {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+pub(crate) mod tests_subagent;

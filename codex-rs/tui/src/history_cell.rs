@@ -1330,6 +1330,12 @@ pub(crate) fn new_stream_error_event(message: String) -> PlainHistoryCell {
     PlainHistoryCell { lines }
 }
 
+/// Render a compact informational line for subagent lifecycle or replies.
+pub(crate) fn new_subagent_event(message: String) -> PlainHistoryCell {
+    let lines: Vec<Line<'static>> = vec![vec!["• ".into(), message.dim().italic()].into()];
+    PlainHistoryCell { lines }
+}
+
 /// Render a user‑friendly plan update styled like a checkbox todo list.
 pub(crate) fn new_plan_update(update: UpdatePlanArgs) -> PlanUpdateCell {
     let UpdatePlanArgs { explanation, plan } = update;

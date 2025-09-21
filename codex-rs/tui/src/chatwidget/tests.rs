@@ -15,6 +15,7 @@ use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
 use codex_core::protocol::AgentReasoningEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
+use codex_core::protocol::BackgroundEventEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecApprovalRequestEvent;
@@ -265,6 +266,148 @@ fn exited_review_mode_emits_results_and_finishes() {
     assert!(!chat.is_review_mode);
 }
 
+/// Background subagent lifecycle events render as compact transcript lines.
+#[test]
+fn subagent_background_event_renders() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
+
+    chat.handle_codex_event(Event {
+        id: "s1".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-1 opened: index repo".to_string(),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    let blob = lines_to_single_string(cells.last().expect("subagent line"));
+    assert!(blob.contains("Subagent subagent-1 opened"), "{blob:?}");
+}
+
+#[test]
+fn subagent_focus_cycle_and_direct_message_op() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    // Announce two subagents
+    chat.handle_codex_event(Event {
+        id: "s0".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-1 opened: index repo".to_string(),
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "s0".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-2 opened: run tests".to_string(),
+        }),
+    });
+    drain_insert_history(&mut rx); // consume lifecycle lines
+
+    // Ctrl+O -> focus first subagent
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let focus_line = drain_insert_history(&mut rx).pop().unwrap();
+    let blob = lines_to_single_string(&focus_line);
+    assert!(blob.contains("Focus: subagent subagent-1"), "{blob:?}");
+
+    // Submit a message; expect SubagentDirectMessage op
+    chat.set_composer_text("hello child".into());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    // Consume the transcript injection
+    let submit_cell = drain_insert_history(&mut rx).pop().unwrap();
+    let submit_blob = lines_to_single_string(&submit_cell);
+    assert!(submit_blob.contains("To subagent subagent-1: hello child"));
+    // Verify op sent to backend (skip AddToHistory if present)
+    let mut op = op_rx.try_recv().expect("expected an op");
+    while matches!(op, Op::AddToHistory { .. }) {
+        op = op_rx
+            .try_recv()
+            .expect("expected subagent direct message op");
+    }
+    match op {
+        Op::SubagentDirectMessage {
+            subagent_id,
+            message,
+            ..
+        } => {
+            assert_eq!(subagent_id, "subagent-1");
+            assert_eq!(message, "hello child");
+        }
+        other => panic!("unexpected op: {other:?}"),
+    }
+
+    // Ctrl+O -> next subagent; submit again
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    drain_insert_history(&mut rx); // focus banner
+    chat.set_composer_text("run unit tests".into());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let mut op2 = op_rx.try_recv().expect("expected second subagent op");
+    while matches!(op2, Op::AddToHistory { .. }) {
+        op2 = op_rx.try_recv().expect("expected second subagent op");
+    }
+    match op2 {
+        Op::SubagentDirectMessage {
+            subagent_id,
+            message,
+            ..
+        } => {
+            assert_eq!(subagent_id, "subagent-2");
+            assert_eq!(message, "run unit tests");
+        }
+        other => panic!("unexpected op: {other:?}"),
+    }
+
+    // Ctrl+O -> back to parent; submitting now should send UserInput, not SubagentDirectMessage
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    drain_insert_history(&mut rx); // focus banner
+    chat.set_composer_text("parent message".into());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let mut op3 = op_rx.try_recv().expect("expected parent user input op");
+    while matches!(op3, Op::AddToHistory { .. }) {
+        op3 = op_rx.try_recv().expect("expected parent user input op");
+    }
+    match op3 {
+        Op::UserInput { items } => {
+            // Should contain exactly one Text item with our message
+            let only = items.first().expect("at least one item");
+            match only {
+                codex_core::protocol::InputItem::Text { text } => {
+                    assert_eq!(text, "parent message");
+                }
+                other => panic!("unexpected input item: {other:?}"),
+            }
+        }
+        other => panic!("unexpected op variant for parent: {other:?}"),
+    }
+}
+
+#[test]
+fn subagent_focus_clears_on_end() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    chat.handle_codex_event(Event {
+        id: "s0".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-9 opened: work".to_string(),
+        }),
+    });
+    drain_insert_history(&mut rx);
+    // Focus it
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    drain_insert_history(&mut rx);
+    // End it; focus should reset to parent implicitly
+    chat.handle_codex_event(Event {
+        id: "s0".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-9 ended".to_string(),
+        }),
+    });
+    drain_insert_history(&mut rx);
+    // Press Ctrl+O cycles: with no active subagents, expect focus remains parent and banner says parent
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let last = drain_insert_history(&mut rx).pop().unwrap();
+    let blob = lines_to_single_string(&last);
+    assert!(blob.contains("Focus: parent"), "{blob:?}");
+}
+
 #[cfg_attr(
     target_os = "macos",
     ignore = "system configuration APIs are blocked under macOS seatbelt"
@@ -338,6 +481,8 @@ fn make_chatwidget_manual() -> (
         suppress_next_review_render: false,
         review_orchestrator: None,
         tui_notifications: TuiNotifications::Enabled(false),
+        focused_subagent: None,
+        subagents: std::collections::BTreeMap::new(),
     };
     (widget, rx, op_rx)
 }

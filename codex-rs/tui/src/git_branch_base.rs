@@ -160,6 +160,7 @@ pub(crate) async fn resolve_base_with_hint() -> io::Result<ResolvedBase> {
     ))
 }
 
+#[allow(dead_code)]
 pub(crate) async fn resolve_base() -> io::Result<String> {
     Ok(resolve_base_with_hint().await?.base)
 }
