@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
@@ -69,4 +71,16 @@ pub(crate) enum AppEvent {
 
     /// Start /review-branch orchestrated batching with a prepared orchestrator.
     StartReviewBranchOrchestrator(Orchestrator),
+
+    /// Open the branch picker option from the review popup.
+    OpenReviewBranchPicker(PathBuf),
+
+    /// Open the commit picker option from the review popup.
+    OpenReviewCommitPicker(PathBuf),
+
+    /// Open the custom prompt option from the review popup.
+    OpenReviewCustomPrompt,
+
+    /// Open the top-level review presets popup.
+    OpenReviewPopup,
 }

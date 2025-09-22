@@ -24,12 +24,16 @@ use codex_protocol::mcp_protocol::Tools;
 use codex_protocol::mcp_protocol::UserSavedConfig;
 use dirs::home_dir;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 use toml::Value as TomlValue;
+use toml_edit::Array as TomlArray;
 use toml_edit::DocumentMut;
+use toml_edit::Item as TomlItem;
+use toml_edit::Table as TomlTable;
 
 const OPENAI_DEFAULT_MODEL: &str = "gpt-5";
 const OPENAI_DEFAULT_REVIEW_MODEL: &str = "gpt-5";
@@ -269,6 +273,85 @@ pub fn load_config_as_toml(codex_home: &Path) -> std::io::Result<TomlValue> {
     }
 }
 
+pub fn load_global_mcp_servers(
+    codex_home: &Path,
+) -> std::io::Result<BTreeMap<String, McpServerConfig>> {
+    let root_value = load_config_as_toml(codex_home)?;
+    let Some(servers_value) = root_value.get("mcp_servers") else {
+        return Ok(BTreeMap::new());
+    };
+
+    servers_value
+        .clone()
+        .try_into()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+pub fn write_global_mcp_servers(
+    codex_home: &Path,
+    servers: &BTreeMap<String, McpServerConfig>,
+) -> std::io::Result<()> {
+    let config_path = codex_home.join(CONFIG_TOML_FILE);
+    let mut doc = match std::fs::read_to_string(&config_path) {
+        Ok(contents) => contents
+            .parse::<DocumentMut>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
+        Err(e) => return Err(e),
+    };
+
+    doc.as_table_mut().remove("mcp_servers");
+
+    if !servers.is_empty() {
+        let mut table = TomlTable::new();
+        table.set_implicit(true);
+        doc["mcp_servers"] = TomlItem::Table(table);
+
+        for (name, config) in servers {
+            let mut entry = TomlTable::new();
+            entry.set_implicit(false);
+            entry["command"] = toml_edit::value(config.command.clone());
+
+            if !config.args.is_empty() {
+                let mut args = TomlArray::new();
+                for arg in &config.args {
+                    args.push(arg.clone());
+                }
+                entry["args"] = TomlItem::Value(args.into());
+            }
+
+            if let Some(env) = &config.env
+                && !env.is_empty()
+            {
+                let mut env_table = TomlTable::new();
+                env_table.set_implicit(false);
+                let mut pairs: Vec<_> = env.iter().collect();
+                pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+                for (key, value) in pairs {
+                    env_table.insert(key, toml_edit::value(value.clone()));
+                }
+                entry["env"] = TomlItem::Table(env_table);
+            }
+
+            if let Some(timeout) = config.startup_timeout_sec {
+                entry["startup_timeout_sec"] = toml_edit::value(timeout.as_secs_f64());
+            }
+
+            if let Some(timeout) = config.tool_timeout_sec {
+                entry["tool_timeout_sec"] = toml_edit::value(timeout.as_secs_f64());
+            }
+
+            doc["mcp_servers"][name.as_str()] = TomlItem::Table(entry);
+        }
+    }
+
+    std::fs::create_dir_all(codex_home)?;
+    let tmp_file = NamedTempFile::new_in(codex_home)?;
+    std::fs::write(tmp_file.path(), doc.to_string())?;
+    tmp_file.persist(config_path).map_err(|err| err.error)?;
+
+    Ok(())
+}
 fn set_project_trusted_inner(doc: &mut DocumentMut, project_path: &Path) -> anyhow::Result<()> {
     // Ensure we render a human-friendly structure:
     //
@@ -1106,6 +1189,8 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
+    use std::collections::BTreeMap;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     #[test]
@@ -1207,6 +1292,72 @@ exclude_slash_tmp = true
             },
             sandbox_workspace_write_cfg.derive_sandbox_policy(sandbox_mode_override)
         );
+    }
+
+    #[test]
+    fn load_global_mcp_servers_returns_empty_if_missing() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let servers = load_global_mcp_servers(codex_home.path())?;
+        assert!(servers.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn write_global_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "docs".to_string(),
+            McpServerConfig {
+                command: "echo".to_string(),
+                args: vec!["hello".to_string()],
+                env: None,
+                startup_timeout_sec: Some(Duration::from_secs(3)),
+                tool_timeout_sec: Some(Duration::from_secs(5)),
+            },
+        );
+
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let loaded = load_global_mcp_servers(codex_home.path())?;
+        assert_eq!(loaded.len(), 1);
+        let docs = loaded.get("docs").expect("docs entry");
+        assert_eq!(docs.command, "echo");
+        assert_eq!(docs.args, vec!["hello".to_string()]);
+        assert_eq!(docs.startup_timeout_sec, Some(Duration::from_secs(3)));
+        assert_eq!(docs.tool_timeout_sec, Some(Duration::from_secs(5)));
+
+        let empty = BTreeMap::new();
+        write_global_mcp_servers(codex_home.path(), &empty)?;
+        let loaded = load_global_mcp_servers(codex_home.path())?;
+        assert!(loaded.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_global_mcp_servers_accepts_legacy_ms_field() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+
+        std::fs::write(
+            &config_path,
+            r#"
+[mcp_servers]
+[mcp_servers.docs]
+command = "echo"
+startup_timeout_ms = 2500
+"#,
+        )?;
+
+        let servers = load_global_mcp_servers(codex_home.path())?;
+        let docs = servers.get("docs").expect("docs entry");
+        assert_eq!(docs.startup_timeout_sec, Some(Duration::from_millis(2500)));
+
+        Ok(())
     }
 
     #[tokio::test]
