@@ -61,6 +61,7 @@ mod markdown_stream;
 mod new_model_popup;
 pub mod onboarding;
 mod pager_overlay;
+mod rate_limits_view;
 mod render;
 mod resume_picker;
 mod session_log;
