@@ -1,9 +1,11 @@
+use crate::ascii_animation::AsciiAnimation;
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
 use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
@@ -14,6 +16,9 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
 use tokio_stream::StreamExt;
+
+const MIN_ANIMATION_HEIGHT: u16 = 24;
+const MIN_ANIMATION_WIDTH: u16 = 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModelUpgradeDecision {
@@ -30,7 +35,7 @@ enum ModelUpgradeOption {
 struct ModelUpgradePopup {
     highlighted: ModelUpgradeOption,
     decision: Option<ModelUpgradeDecision>,
-    request_frame: FrameRequester,
+    animation: AsciiAnimation,
 }
 
 impl ModelUpgradePopup {
@@ -38,7 +43,7 @@ impl ModelUpgradePopup {
         Self {
             highlighted: ModelUpgradeOption::TryNewModel,
             decision: None,
-            request_frame,
+            animation: AsciiAnimation::new(request_frame),
         }
     }
 
@@ -50,6 +55,11 @@ impl ModelUpgradePopup {
             KeyCode::Char('2') => self.select(ModelUpgradeOption::KeepCurrent),
             KeyCode::Enter => self.select(self.highlighted),
             KeyCode::Esc => self.select(ModelUpgradeOption::KeepCurrent),
+            KeyCode::Char('.') => {
+                if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                    let _ = self.animation.pick_random_variant();
+                }
+            }
             _ => {}
         }
     }
@@ -57,13 +67,13 @@ impl ModelUpgradePopup {
     fn highlight(&mut self, option: ModelUpgradeOption) {
         if self.highlighted != option {
             self.highlighted = option;
-            self.request_frame.schedule_frame();
+            self.animation.request_frame();
         }
     }
 
     fn select(&mut self, option: ModelUpgradeOption) {
         self.decision = Some(option.into());
-        self.request_frame.schedule_frame();
+        self.animation.request_frame();
     }
 }
 
@@ -79,15 +89,25 @@ impl From<ModelUpgradeOption> for ModelUpgradeDecision {
 impl WidgetRef for &ModelUpgradePopup {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         Clear.render(area, buf);
+        self.animation.schedule_next_frame();
+
+        // Skip the animation entirely when the viewport is too small so we don't clip frames.
+        let show_animation =
+            area.height >= MIN_ANIMATION_HEIGHT && area.width >= MIN_ANIMATION_WIDTH;
 
         let mut lines: Vec<Line> = Vec::new();
-        // Title
+        if show_animation {
+            let frame = self.animation.current_frame();
+            lines.extend(frame.lines().map(|l| l.into()));
+            // Spacer between animation and text content.
+            lines.push("".into());
+        }
+
         lines.push(Line::from(vec![
             "  ".into(),
             "Introducing GPT-5-Codex".bold(),
         ]));
         lines.push("".into());
-        // Body
         lines.push(
             "  GPT-5-Codex works faster through easy tasks and harder on complex tasks,".into(),
         );
@@ -111,6 +131,7 @@ impl WidgetRef for &ModelUpgradePopup {
             ModelUpgradeOption::TryNewModel,
             "Try the new GPT-5-Codex model",
         ));
+        lines.push("".into());
         lines.push(create_option(
             1,
             ModelUpgradeOption::KeepCurrent,

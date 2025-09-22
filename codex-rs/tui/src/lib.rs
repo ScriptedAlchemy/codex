@@ -33,6 +33,7 @@ mod app;
 mod app_backtrack;
 mod app_event;
 mod app_event_sender;
+mod ascii_animation;
 mod bottom_pane;
 mod chatwidget;
 mod citation_regex;
@@ -42,6 +43,7 @@ pub mod custom_terminal;
 mod diff_render;
 mod exec_command;
 mod file_search;
+mod frames;
 mod get_git_diff;
 mod review_branch {
     pub mod chunker;
