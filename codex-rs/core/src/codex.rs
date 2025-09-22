@@ -2573,7 +2573,7 @@ async fn handle_response_item(
             info!("FunctionCall: {name}({arguments})");
             Some(
                 handle_function_call(
-                    &sess,
+                    Arc::clone(&sess),
                     turn_context,
                     turn_diff_tracker,
                     sub_id.to_string(),
@@ -2746,7 +2746,7 @@ async fn handle_unified_exec_tool_call(
 }
 
 async fn handle_function_call(
-    sess: &Session,
+    sess: Arc<Session>,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: String,
@@ -2755,6 +2755,19 @@ async fn handle_function_call(
     call_id: String,
 ) -> ResponseInputItem {
     match name.as_str() {
+        "subagent_open" | "subagent_reply" | "subagent_mailbox" | "subagent_read"
+        | "subagent_end" => {
+            return handle_custom_tool_call(
+                sess,
+                turn_context,
+                turn_diff_tracker,
+                sub_id,
+                name,
+                arguments,
+                call_id,
+            )
+            .await;
+        }
         "container.exec" | "shell" => {
             let params = match parse_container_exec_arguments(arguments, turn_context, &call_id) {
                 Ok(params) => params,
@@ -2764,7 +2777,7 @@ async fn handle_function_call(
             };
             handle_container_exec_with_params(
                 params,
-                sess,
+                sess.as_ref(),
                 turn_context,
                 turn_diff_tracker,
                 sub_id,
@@ -2796,7 +2809,7 @@ async fn handle_function_call(
             };
 
             handle_unified_exec_tool_call(
-                sess,
+                sess.as_ref(),
                 call_id,
                 args.session_id,
                 args.input,
@@ -2860,7 +2873,7 @@ async fn handle_function_call(
             };
             handle_container_exec_with_params(
                 exec_params,
-                sess,
+                sess.as_ref(),
                 turn_context,
                 turn_diff_tracker,
                 sub_id,
@@ -2868,7 +2881,7 @@ async fn handle_function_call(
             )
             .await
         }
-        "update_plan" => handle_update_plan(sess, arguments, sub_id, call_id).await,
+        "update_plan" => handle_update_plan(sess.as_ref(), arguments, sub_id, call_id).await,
         EXEC_COMMAND_TOOL_NAME => {
             // TODO(mbolin): Sandbox check.
             let exec_params = match serde_json::from_str::<ExecCommandParams>(&arguments) {
@@ -2920,7 +2933,15 @@ async fn handle_function_call(
         _ => {
             match sess.mcp_connection_manager.parse_tool_name(&name) {
                 Some((server, tool_name)) => {
-                    handle_mcp_tool_call(sess, &sub_id, call_id, server, tool_name, arguments).await
+                    handle_mcp_tool_call(
+                        sess.as_ref(),
+                        &sub_id,
+                        call_id,
+                        server,
+                        tool_name,
+                        arguments,
+                    )
+                    .await
                 }
                 None => {
                     // Unknown function: reply with structured failure so the model can adapt.
