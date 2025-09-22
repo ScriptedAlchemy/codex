@@ -60,17 +60,15 @@ use tracing::debug;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::bottom_pane::BottomPane;
+use crate::bottom_pane::BottomPaneParams;
+use crate::bottom_pane::CancellationEvent;
+use crate::bottom_pane::InputResult;
+use crate::bottom_pane::SelectionAction;
+use crate::bottom_pane::SelectionItem;
+use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::STANDARD_POPUP_HINT_LINE;
-use crate::bottom_pane::{
-    BottomPane,
-    BottomPaneParams,
-    CancellationEvent,
-    InputResult,
-    SelectionAction,
-    SelectionItem,
-    SelectionViewParams,
-};
 use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::diff_render::display_path_for;
 use crate::get_git_diff::get_git_diff;
@@ -106,7 +104,6 @@ use crate::streaming::controller::StreamController;
 //
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
-use codex_common::model_presets::ModelPreset;
 use codex_common::model_presets::builtin_model_presets;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;

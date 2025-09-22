@@ -102,6 +102,8 @@ fn make_chatwidget_manual() -> (
         session_header: SessionHeader::new(cfg.model.clone()),
         initial_user_message: None,
         token_info: None,
+        rate_limit_snapshot: None,
+        rate_limit_warnings: RateLimitWarningState::default(),
         stream: StreamController::new(cfg),
         running_commands: HashMap::new(),
         task_complete_pending: false,
