@@ -1,7 +1,6 @@
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
-use codex_core::config::SWIFTFOX_MEDIUM_MODEL;
 use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -81,18 +80,19 @@ impl WidgetRef for &ModelUpgradePopup {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         Clear.render(area, buf);
 
-        let mut lines: Vec<Line> = vec![
-            String::new().into(),
-            format!("   Codex is now powered by {SWIFTFOX_MEDIUM_MODEL}, a new model that is")
-                .into(),
-            Line::from(vec![
-                "   ".into(),
-                "faster, a better collaborator, ".bold(),
-                "and ".into(),
-                "more steerable.".bold(),
-            ]),
-            "".into(),
-        ];
+        let mut lines: Vec<Line> = Vec::new();
+        // Title
+        lines.push(Line::from(vec![
+            "  ".into(),
+            "Introducing GPT-5-Codex".bold(),
+        ]));
+        lines.push("".into());
+        // Body
+        lines.push(
+            "  GPT-5-Codex works faster through easy tasks and harder on complex tasks,".into(),
+        );
+        lines.push("  improves on code quality, and is more steerable with AGENTS.md.".into());
+        lines.push("".into());
 
         let create_option =
             |index: usize, option: ModelUpgradeOption, text: &str| -> Line<'static> {
@@ -109,12 +109,12 @@ impl WidgetRef for &ModelUpgradePopup {
         lines.push(create_option(
             0,
             ModelUpgradeOption::TryNewModel,
-            &format!("Yes, switch me to {SWIFTFOX_MEDIUM_MODEL}"),
+            "Try the new GPT-5-Codex model",
         ));
         lines.push(create_option(
             1,
             ModelUpgradeOption::KeepCurrent,
-            "Not right now",
+            "Continue using current model",
         ));
         lines.push("".into());
         lines.push(
