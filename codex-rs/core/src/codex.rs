@@ -3087,14 +3087,16 @@ impl Session {
         &self,
         args: &SubagentReplyArgs,
     ) -> Result<serde_json::Value, String> {
+        // Capture description before the blocking call to avoid race with subagent_end
+        let description = {
+            let subs = self.subagents.lock().await;
+            subs.get(&args.subagent_id).map(|s| s.description.clone())
+        };
+
         let result =
             crate::subagent::subagent_reply_blocking(&self.subagents, &self.mailbox, args).await;
 
         if result.is_ok() {
-            let description = {
-                let subs = self.subagents.lock().await;
-                subs.get(&args.subagent_id).map(|s| s.description.clone())
-            };
             if let Some(desc) = description {
                 self.notify_background_event(
                     &args.subagent_id,
@@ -3952,8 +3954,6 @@ mod tests {
 
     #[tokio::test]
     async fn subagent_reply_emits_background_event() {
-        
-
         // Build a session that exposes an rx_event so we can assert on BackgroundEvent.
         let (tx_event, rx_event) = async_channel::unbounded();
 
