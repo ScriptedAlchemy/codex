@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
@@ -313,7 +312,6 @@ pub(crate) struct Session {
     mailbox: Mutex<Mailbox>,
     subagent_slots: Arc<Semaphore>,
     subagent_settings: SubagentSettings,
-    subagent_depth: AtomicU8,
 }
 
 // Subagent state, mailbox, and settings now live in `subagent.rs`.
@@ -526,7 +524,6 @@ impl Session {
                 max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
                 _max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
             },
-            subagent_depth: AtomicU8::new(0),
         });
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
@@ -571,7 +568,6 @@ impl Session {
         crate::subagent::open_subagent(
             Arc::clone(&self.auth_manager),
             &self.next_internal_sub_id,
-            &self.subagent_depth,
             Arc::clone(&self.subagent_slots),
             self.subagent_settings,
             &self.subagents,
@@ -3096,14 +3092,14 @@ impl Session {
         let result =
             crate::subagent::subagent_reply_blocking(&self.subagents, &self.mailbox, args).await;
 
-        if result.is_ok() {
-            if let Some(desc) = description {
-                self.notify_background_event(
-                    &args.subagent_id,
-                    format!("Subagent {} replied: {}", args.subagent_id, desc),
-                )
-                .await;
-            }
+        if result.is_ok()
+            && let Some(desc) = description
+        {
+            self.notify_background_event(
+                &args.subagent_id,
+                format!("Subagent {} replied: {}", args.subagent_id, desc),
+            )
+            .await;
         }
         result
     }
@@ -3117,7 +3113,7 @@ impl Session {
     }
 
     async fn end_subagent(&self, args: SubagentEndArgs) -> Result<serde_json::Value, String> {
-        crate::subagent::end_subagent(&self.subagents, &self.subagent_depth, args).await
+        crate::subagent::end_subagent(&self.subagents, args).await
     }
 }
 
@@ -3887,7 +3883,6 @@ mod tests {
                 max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
                 _max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
             },
-            subagent_depth: AtomicU8::new(0),
         });
 
         // Open a subagent through the tool-call path to trigger a BackgroundEvent.
@@ -4024,7 +4019,6 @@ mod tests {
                 max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
                 _max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
             },
-            subagent_depth: AtomicU8::new(0),
         };
 
         // Open a subagent with a small idle timeout so the reply finishes quickly via timeout.
@@ -4089,14 +4083,14 @@ mod tests {
     }
 
     #[test]
-    fn subagent_depth_limit_blocks_second_until_end() {
+    fn subagent_depth_one_allows_multiple_siblings_until_concurrency() {
         let (mut session, turn_context) = make_session_and_context();
 
-        // Enforce depth=1: allow one open, block the second until the first ends.
+        // depth=1 means root may spawn children; children may not spawn more.
         session.subagent_settings.max_depth = 1;
 
-        let args1 = SubagentOpenArgs {
-            goal: "first".to_string(),
+        let mk = |goal: &str| SubagentOpenArgs {
+            goal: goal.to_string(),
             system_prompt: None,
             model: None,
             approval_policy: None,
@@ -4106,43 +4100,15 @@ mod tests {
             max_runtime_ms: None,
         };
 
-        let open1 = tokio_test::block_on(session.open_subagent(&turn_context, args1))
-            .expect("first subagent should open at depth 0");
+        let _one = tokio_test::block_on(session.open_subagent(&turn_context, mk("one")))
+            .expect("first subagent should open");
+        let _two = tokio_test::block_on(session.open_subagent(&turn_context, mk("two")))
+            .expect("second subagent should open (sibling)");
 
-        let args2 = SubagentOpenArgs {
-            goal: "second".to_string(),
-            system_prompt: None,
-            model: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            cwd: None,
-            max_turns: None,
-            max_runtime_ms: None,
-        };
-        let err2 = tokio_test::block_on(session.open_subagent(&turn_context, args2))
-            .expect_err("second subagent should be blocked by depth limit");
-        assert!(err2.contains("subagent depth limit"), "{err2}");
-
-        // End the first and verify we can open again.
-        let _ = tokio_test::block_on(session.end_subagent(SubagentEndArgs {
-            subagent_id: open1.subagent_id,
-            persist: Some(false),
-            archive_to: None,
-        }))
-        .expect("end_subagent should succeed");
-
-        let args3 = SubagentOpenArgs {
-            goal: "third".to_string(),
-            system_prompt: None,
-            model: None,
-            approval_policy: None,
-            sandbox_mode: None,
-            cwd: None,
-            max_turns: None,
-            max_runtime_ms: None,
-        };
-        let _open3 = tokio_test::block_on(session.open_subagent(&turn_context, args3))
-            .expect("should open after depth decremented");
+        // Default concurrency is 2; third should fail with concurrency, not depth.
+        let err = tokio_test::block_on(session.open_subagent(&turn_context, mk("three")))
+            .expect_err("third subagent should be limited by concurrency");
+        assert!(err.contains("maximum concurrent subagents"), "{err}");
     }
 
     #[test]
@@ -4455,7 +4421,6 @@ mod tests {
                 max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
                 _max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
             },
-            subagent_depth: AtomicU8::new(0),
         };
         (session, turn_context)
     }
