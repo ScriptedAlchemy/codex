@@ -951,15 +951,19 @@ impl ChatWidget {
             _ => {
                 match self.bottom_pane.handle_key_event(key_event) {
                     InputResult::Submitted(text) => {
-                        // If a task is running, queue the user input to be sent after the turn completes.
+                        // When a subagent is focused, allow sending messages to it even while
+                        // the parent turn is running. This keeps subagent chats responsive and
+                        // avoids blocking the main chat while subagent opens/replies proceed.
                         let user_message = UserMessage {
                             text,
                             image_paths: self.bottom_pane.take_recent_submission_images(),
                         };
-                        if self.bottom_pane.is_task_running() {
+                        if self.bottom_pane.is_task_running() && self.focused_subagent.is_none() {
+                            // Parent focused: queue until the current turn completes.
                             self.queued_user_messages.push_back(user_message);
                             self.refresh_queued_user_messages();
                         } else {
+                            // Either no task is running, or a subagent is focused: send now.
                             self.submit_user_message(user_message);
                         }
                     }

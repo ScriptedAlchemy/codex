@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU8;
-use std::sync::atomic::Ordering;
+// (No direct atomic imports; use fully-qualified types inline.)
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -138,45 +137,6 @@ pub(crate) struct SubagentEndArgs {
     pub archive_to: Option<String>,
 }
 
-/// RAII guard that reserves one unit of subagent depth. If dropped while
-/// still armed, it decrements the counter to roll back the reservation.
-pub(crate) struct SubagentDepthReservation<'a> {
-    depth: &'a AtomicU8,
-    armed: bool,
-}
-
-impl<'a> SubagentDepthReservation<'a> {
-    pub fn new(depth: &'a AtomicU8, max_depth: u8) -> Result<Self, String> {
-        // Attempt an atomic increment only if below max_depth.
-        match depth.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-            if v < max_depth {
-                Some(v.saturating_add(1))
-            } else {
-                None
-            }
-        }) {
-            Ok(_prev) => Ok(Self { depth, armed: true }),
-            Err(_cur) => Err("subagent depth limit reached".to_string()),
-        }
-    }
-
-    pub fn commit(mut self) {
-        self.armed = false;
-    }
-}
-
-impl<'a> Drop for SubagentDepthReservation<'a> {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = self
-                .depth
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                    Some(v.saturating_sub(1))
-                });
-        }
-    }
-}
-
 pub(crate) fn summarize_goal(goal: &str) -> String {
     let trimmed = goal.trim();
     if trimmed.is_empty() {
@@ -196,16 +156,21 @@ pub(crate) fn summarize_goal(goal: &str) -> String {
 pub(crate) async fn open_subagent(
     auth_manager: Arc<AuthManager>,
     next_internal_sub_id: &std::sync::atomic::AtomicU64,
-    subagent_depth: &std::sync::atomic::AtomicU8,
     subagent_slots: Arc<Semaphore>,
     subagent_settings: SubagentSettings,
     subagents: &Mutex<HashMap<String, SubagentState>>,
     turn_context: &TurnContext,
     args: SubagentOpenArgs,
 ) -> Result<SubagentOpenResult, String> {
-    // Reserve a depth slot up-front to prevent races.
-    // If anything fails later, the reservation is rolled back by Drop.
-    let depth_guard = SubagentDepthReservation::new(subagent_depth, subagent_settings.max_depth)?;
+    // Interpret `max_depth` as the maximum nesting depth, not the number of
+    // sibling subagents. Because child subagents do not expose the subagent
+    // tools (see `include_subagent_tool = false` below), calls here originate
+    // from the root session, which is depth 0. Therefore, if `max_depth` is 0
+    // we disallow opening any subagents; otherwise we allow any number of
+    // siblings subject to the concurrency semaphore.
+    if subagent_settings.max_depth == 0 {
+        return Err("subagent depth limit reached".to_string());
+    }
 
     let permit = match subagent_slots.clone().try_acquire_owned() {
         Ok(permit) => permit,
@@ -242,10 +207,9 @@ pub(crate) async fn open_subagent(
     let description = summarize_goal(&goal);
 
     let mut child_config = (*turn_context.client.config()).clone();
-    // Nested subagents are disabled for now. Keep capability for the future by
-    // leaving depth accounting in place. If enabling nested subagents later,
-    // ensure the parent's current depth is propagated so the child starts at
-    // parent_depth + 1 and respects the global max depth.
+    // Nested subagents are disabled for now. If enabling them in the future,
+    // ensure the parent's current depth would be propagated so the child starts
+    // at parent_depth + 1 and respects the global max depth.
     child_config.include_subagent_tool = false;
     // Ensure subagents always have access to the plan tool so they can
     // externalize a brief plan before acting.
@@ -364,8 +328,8 @@ pub(crate) async fn open_subagent(
         );
     }
 
-    // Keep the depth reservation (do not roll back on drop)
-    depth_guard.commit();
+    // Depth is not incremented for sibling subagents; children cannot spawn
+    // subagents because we disable the tool set for them below.
 
     Ok(SubagentOpenResult {
         subagent_id,
@@ -641,7 +605,6 @@ pub(crate) async fn read_mail(
 
 pub(crate) async fn end_subagent(
     subagents: &Mutex<HashMap<String, SubagentState>>,
-    subagent_depth: &std::sync::atomic::AtomicU8,
     args: SubagentEndArgs,
 ) -> Result<serde_json::Value, String> {
     let SubagentEndArgs {
@@ -656,10 +619,6 @@ pub(crate) async fn end_subagent(
         let Some(state) = map.remove(&subagent_id) else {
             return Err(format!("unknown subagent_id: {subagent_id}"));
         };
-        // Decrease current depth when a subagent is ended
-        let _ = subagent_depth.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-            Some(v.saturating_sub(1))
-        });
         (
             state.conversation,
             state.conversation_id,
