@@ -182,6 +182,9 @@ pub(crate) const MODEL_FORMAT_HEAD_BYTES: usize = MODEL_FORMAT_MAX_BYTES / 2;
 
 // Constants moved to `subagent.rs`.
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 impl Codex {
     /// Spawn a new [`Codex`] and initialize the session.
     pub async fn spawn(

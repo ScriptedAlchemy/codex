@@ -380,10 +380,19 @@ pub(crate) async fn subagent_reply_blocking(
     }
 
     // Submit user input to child
-    let _child_submit_id = conversation
+    let submit_result = conversation
         .submit(crate::protocol::Op::UserInput { items })
-        .await
-        .map_err(|e| format!("failed to submit to subagent: {e}"))?;
+        .await;
+    let _child_submit_id = match submit_result {
+        Ok(id) => id,
+        Err(e) => {
+            let mut guard = subagents.lock().await;
+            if let Some(st) = guard.get_mut(subagent_id) {
+                st.running = false;
+            }
+            return Err(format!("failed to submit to subagent: {e}"));
+        }
+    };
 
     // Event loop: collect reply, token usage; enforce idle timeout
     let mut reply_text: String = String::new();
@@ -654,4 +663,68 @@ pub(crate) async fn end_subagent(
         "conversation_id": conversation_id,
         "archived_path": archived_path,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex::test_helpers::dead_submit_conversation;
+    use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn running_flag_clears_when_submit_fails() {
+        let conversation = dead_submit_conversation();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("acquire permit for subagent state");
+
+        let subagent_id = "test-subagent".to_string();
+
+        let state = SubagentState {
+            conversation,
+            conversation_id: ConversationId::new(),
+            rollout_path: PathBuf::new(),
+            description: "test".to_string(),
+            _created_at: Instant::now(),
+            last_active: Instant::now(),
+            turns_completed: 0,
+            running: false,
+            max_turns: None,
+            max_runtime: None,
+            _permit: permit,
+        };
+
+        let subagents = Mutex::new(HashMap::from([(subagent_id.clone(), state)]));
+        let mailbox = Mutex::new(Mailbox::default());
+
+        let args = SubagentReplyArgs {
+            subagent_id: subagent_id.clone(),
+            message: "hello".to_string(),
+            images: None,
+            mode: None,
+            timeout_ms: None,
+        };
+
+        let err = subagent_reply_blocking(&subagents, &mailbox, &args)
+            .await
+            .expect_err("failing submit must propagate error");
+        assert!(
+            err.contains("failed to submit to subagent"),
+            "unexpected error message: {err}"
+        );
+
+        let guard = subagents.lock().await;
+        let state = guard
+            .get(&subagent_id)
+            .expect("subagent should remain registered");
+        assert_eq!(
+            false, state.running,
+            "running flag should reset even when submit fails"
+        );
+    }
 }
