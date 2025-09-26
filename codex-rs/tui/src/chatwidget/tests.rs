@@ -2,6 +2,7 @@ use super::*;
 use crate::app_event::AppEvent;
 use crate::app_event::ReviewBranchMode;
 use crate::app_event_sender::AppEventSender;
+use crate::pr_checks::PrChecksOutcome;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::config::Config;
@@ -22,6 +23,7 @@ use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::FileChange;
+use codex_core::protocol::InputItem;
 use codex_core::protocol::InputMessageKind;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
@@ -326,6 +328,7 @@ fn make_chatwidget_manual() -> (
         stream_controller: None,
         running_commands: HashMap::new(),
         task_complete_pending: false,
+        pr_checks_in_progress: false,
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
         full_reasoning_buffer: String::new(),
@@ -1395,6 +1398,128 @@ fn ui_snapshots_small_heights_task_running() {
             .draw(|f| f.render_widget_ref(&chat, f.area()))
             .expect("draw chat running");
         assert_snapshot!(name, terminal.backend());
+    }
+}
+
+#[test]
+fn pr_checks_success_records_info_history() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+    chat.pr_checks_in_progress = true;
+
+    chat.on_pr_checks_finished(PrChecksOutcome {
+        success: true,
+        exit_status: Some(0),
+        stdout: "all checks passing".into(),
+        stderr: String::new(),
+        spawn_error: None,
+    });
+
+    assert!(!chat.pr_checks_in_progress, "flag should reset");
+    assert!(
+        op_rx.try_recv().is_err(),
+        "success should not send user input"
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected single info entry");
+    let blob = lines_to_single_string(cells.last().unwrap());
+    assert!(
+        blob.contains("`gh pr checks --watch` completed successfully."),
+        "info entry should mention success"
+    );
+    assert!(
+        blob.contains("stdout:\n```\nall checks passing"),
+        "info entry should include stdout snippet"
+    );
+}
+
+#[test]
+fn pr_checks_failure_sends_fix_prompt() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    chat.on_pr_checks_finished(PrChecksOutcome {
+        success: false,
+        exit_status: Some(1),
+        stdout: "lint failure".into(),
+        stderr: "test panic".into(),
+        spawn_error: None,
+    });
+
+    assert!(!chat.pr_checks_in_progress, "flag should reset");
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.iter().any(|lines| {
+            let blob = lines_to_single_string(lines);
+            blob.contains("failed with exit code 1")
+        }),
+        "history should contain failure error message"
+    );
+
+    let op = op_rx.try_recv().expect("expected user prompt");
+    match op {
+        Op::UserInput { items } => {
+            assert_eq!(items.len(), 1);
+            match &items[0] {
+                InputItem::Text { text } => {
+                    assert!(
+                        text.contains("Please fix the issues reported by the PR checks."),
+                        "submitted prompt should instruct fixing"
+                    );
+                    assert!(
+                        text.contains("stdout:\n```\nlint failure"),
+                        "prompt should include stdout snippet"
+                    );
+                    assert!(
+                        text.contains("stderr:\n```\ntest panic"),
+                        "prompt should include stderr snippet"
+                    );
+                }
+                other => panic!("unexpected input item: {other:?}"),
+            }
+        }
+        other => panic!("unexpected op: {other:?}"),
+    }
+}
+
+#[test]
+fn pr_checks_spawn_error_reports_issue() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    chat.on_pr_checks_finished(PrChecksOutcome::failure_with_error(
+        "gh executable not found".into(),
+    ));
+
+    assert!(!chat.pr_checks_in_progress, "flag should reset");
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.iter().any(|lines| {
+            let blob = lines_to_single_string(lines);
+            blob.contains("could not be executed")
+        }),
+        "history should mention spawn error"
+    );
+
+    let op = op_rx.try_recv().expect("expected user prompt");
+    match op {
+        Op::UserInput { items } => {
+            assert_eq!(items.len(), 1);
+            match &items[0] {
+                InputItem::Text { text } => {
+                    assert!(
+                        text.contains("gh executable not found"),
+                        "prompt should include spawn error"
+                    );
+                    assert!(
+                        text.contains("rerun /pr-checks"),
+                        "prompt should advise rerunning"
+                    );
+                }
+                other => panic!("unexpected input item: {other:?}"),
+            }
+        }
+        other => panic!("unexpected op: {other:?}"),
     }
 }
 

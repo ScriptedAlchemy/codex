@@ -5,6 +5,7 @@ use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
 
 use crate::history_cell::HistoryCell;
+use crate::pr_checks::PrChecksOutcome;
 
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
@@ -46,6 +47,9 @@ pub(crate) enum AppEvent {
 
     /// Result of computing a `/diff` command.
     DiffResult(String),
+
+    /// Result of executing `/pr-checks`.
+    PrChecksFinished(PrChecksOutcome),
 
     InsertHistoryCell(Box<dyn HistoryCell>),
 

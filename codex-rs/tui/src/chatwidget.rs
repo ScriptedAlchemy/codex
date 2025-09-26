@@ -86,6 +86,8 @@ use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PatchEventType;
 use crate::history_cell::RateLimitSnapshotDisplay;
 use crate::markdown::append_markdown;
+use crate::pr_checks::PrChecksOutcome;
+use crate::pr_checks::run_pr_checks;
 use crate::review_branch::chunker::ChunkLimits;
 use crate::review_branch::orchestrator::Orchestrator;
 use crate::review_branch::orchestrator::OrchestratorStage;
@@ -132,6 +134,9 @@ const REVIEW_BRANCH_LIMITS: ChunkLimits = ChunkLimits {
     large_file_threshold_lines: 400,
     max_lines: 5000,
 };
+const PR_CHECKS_OUTPUT_MAX_GRAPHEMES: usize = 4000;
+
+const PR_CHECKS_COMMAND_DISPLAY: &str = "`gh pr checks --watch`";
 
 // Track information about an in-flight exec command.
 struct RunningCommand {
@@ -251,6 +256,7 @@ pub(crate) struct ChatWidget {
     stream_controller: Option<StreamController>,
     running_commands: HashMap<String, RunningCommand>,
     task_complete_pending: bool,
+    pr_checks_in_progress: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupts: InterruptManager,
     // Accumulates the current reasoning block text to extract a header
@@ -911,6 +917,7 @@ impl ChatWidget {
             stream_controller: None,
             running_commands: HashMap::new(),
             task_complete_pending: false,
+            pr_checks_in_progress: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
@@ -973,6 +980,7 @@ impl ChatWidget {
             stream_controller: None,
             running_commands: HashMap::new(),
             task_complete_pending: false,
+            pr_checks_in_progress: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
@@ -1101,6 +1109,9 @@ impl ChatWidget {
             }
             SlashCommand::Review => {
                 self.open_review_popup();
+            }
+            SlashCommand::PrChecks => {
+                self.start_pr_checks();
             }
             SlashCommand::Model => {
                 self.open_model_popup();
@@ -1596,6 +1607,134 @@ impl ChatWidget {
             &self.conversation_id,
             self.rate_limit_snapshot.as_ref(),
         ));
+    }
+
+    pub(crate) fn start_pr_checks(&mut self) {
+        if self.pr_checks_in_progress {
+            self.add_info_message(
+                "PR checks are already running.".to_string(),
+                Some(
+                    "Wait for the current run to finish before using /pr-checks again.".to_string(),
+                ),
+            );
+            return;
+        }
+
+        self.pr_checks_in_progress = true;
+        self.add_info_message(format!("Running {PR_CHECKS_COMMAND_DISPLAY}..."), None);
+
+        let tx = self.app_event_tx.clone();
+        let cwd = self.config.cwd.clone();
+        tokio::spawn(async move {
+            let outcome = run_pr_checks(cwd).await;
+            tx.send(AppEvent::PrChecksFinished(outcome));
+        });
+    }
+
+    pub(crate) fn on_pr_checks_finished(&mut self, outcome: PrChecksOutcome) {
+        self.pr_checks_in_progress = false;
+
+        let PrChecksOutcome {
+            success,
+            exit_status,
+            stdout,
+            stderr,
+            spawn_error,
+        } = outcome;
+
+        if spawn_error.is_some() {
+            if let Some(error) = spawn_error.as_deref() {
+                self.add_error_message(format!(
+                    "Failed to run {PR_CHECKS_COMMAND_DISPLAY}: {error}"
+                ));
+            }
+            self.begin_fixing_pr_checks(spawn_error, exit_status, stdout, stderr);
+            return;
+        }
+
+        if success {
+            let mut message = format!("{PR_CHECKS_COMMAND_DISPLAY} completed successfully.");
+            if let Some(snippet) = Self::format_pr_checks_output_snippet(&stdout, &stderr) {
+                message.push_str("\n\n");
+                message.push_str(&snippet);
+            }
+            self.add_info_message(message, None);
+        } else {
+            let exit_description = exit_status
+                .map(|code| format!("exit code {code}"))
+                .unwrap_or_else(|| "no exit status (terminated by signal)".to_string());
+
+            self.add_error_message(format!(
+                "{PR_CHECKS_COMMAND_DISPLAY} failed with {exit_description}. Starting automatic fix."
+            ));
+            self.begin_fixing_pr_checks(spawn_error, exit_status, stdout, stderr);
+        }
+    }
+
+    fn begin_fixing_pr_checks(
+        &mut self,
+        spawn_error: Option<String>,
+        exit_status: Option<i32>,
+        stdout: String,
+        stderr: String,
+    ) {
+        if let Some(error) = spawn_error {
+            let truncated = truncate_text(&error, PR_CHECKS_OUTPUT_MAX_GRAPHEMES);
+            let mut message = format!(
+                "{PR_CHECKS_COMMAND_DISPLAY} could not be executed. Please resolve the underlying issue and ensure the PR checks pass."
+            );
+            message.push_str("\n\nSpawn error:\n```\n");
+            message.push_str(&truncated);
+            message.push_str("\n```");
+            message.push_str(
+                "\n\nAfter addressing the problems, rerun /pr-checks to verify the checks succeed.",
+            );
+            self.submit_text_message(message);
+            return;
+        }
+
+        let exit_description = exit_status
+            .map(|code| format!("exit code {code}"))
+            .unwrap_or_else(|| "no exit status (terminated by signal)".to_string());
+
+        let mut message = format!(
+            "{PR_CHECKS_COMMAND_DISPLAY} failed with {exit_description}. Please fix the issues reported by the PR checks."
+        );
+
+        if let Some(snippet) = Self::format_pr_checks_output_snippet(&stdout, &stderr) {
+            message.push_str("\n\n");
+            message.push_str(&snippet);
+        }
+
+        message.push_str(
+            "\n\nAfter addressing the problems, rerun /pr-checks to verify the checks succeed.",
+        );
+
+        self.submit_text_message(message);
+    }
+
+    fn format_pr_checks_output_snippet(stdout: &str, stderr: &str) -> Option<String> {
+        let mut blocks = Vec::new();
+        if let Some(block) = Self::format_pr_checks_output_block("stdout", stdout) {
+            blocks.push(block);
+        }
+        if let Some(block) = Self::format_pr_checks_output_block("stderr", stderr) {
+            blocks.push(block);
+        }
+        if blocks.is_empty() {
+            None
+        } else {
+            Some(blocks.join("\n\n"))
+        }
+    }
+
+    fn format_pr_checks_output_block(label: &str, content: &str) -> Option<String> {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let truncated = truncate_text(trimmed, PR_CHECKS_OUTPUT_MAX_GRAPHEMES);
+        Some(format!("{label}:\n```\n{truncated}\n```"))
     }
 
     /// Open a popup to choose the model preset (model + reasoning effort).

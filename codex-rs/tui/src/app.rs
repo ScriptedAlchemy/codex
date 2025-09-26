@@ -298,6 +298,9 @@ impl App {
                 ));
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::PrChecksFinished(outcome) => {
+                self.chat_widget.on_pr_checks_finished(outcome);
+            }
             AppEvent::StartFileSearch(query) => {
                 if !query.is_empty() {
                     self.file_search.on_user_query(query);
