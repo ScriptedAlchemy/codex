@@ -102,7 +102,6 @@ use self::agent::spawn_agent_from_existing;
 mod session_header;
 use self::session_header::SessionHeader;
 use crate::streaming::controller::StreamController;
-
 use anyhow::Result as AnyResult;
 use chrono::Local;
 use codex_common::approval_presets::ApprovalPreset;
