@@ -634,7 +634,6 @@ name = "codex-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "assert_cmd",
  "clap",
  "clap_complete",
  "codex-arg0",
@@ -651,11 +650,8 @@ dependencies = [
  "ctor 0.5.0",
  "libc",
  "owo-colors",
- "predicates",
- "pretty_assertions",
  "serde_json",
  "supports-color",
- "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

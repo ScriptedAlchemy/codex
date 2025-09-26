@@ -50,7 +50,6 @@ mod review_branch {
     pub mod chunker;
     pub mod orchestrator;
 }
-mod git_branch_base;
 mod git_branch_summary;
 mod history_cell;
 pub mod insert_history;
