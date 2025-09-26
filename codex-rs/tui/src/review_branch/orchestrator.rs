@@ -10,7 +10,14 @@ use crate::review_branch::chunker::ChunkLimits;
 use crate::review_branch::chunker::collect_branch_numstat;
 use crate::review_branch::chunker::score_and_chunk;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OrchestratorStage {
+    Batching,
+    Consolidation,
+    Done,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
     Batching,
     Consolidation,
@@ -56,6 +63,14 @@ impl Orchestrator {
 
     pub fn has_batches(&self) -> bool {
         !self.batches.is_empty()
+    }
+
+    pub fn stage(&self) -> OrchestratorStage {
+        match self.stage {
+            Stage::Batching => OrchestratorStage::Batching,
+            Stage::Consolidation => OrchestratorStage::Consolidation,
+            Stage::Done => OrchestratorStage::Done,
+        }
     }
 
     pub fn start(&mut self) {

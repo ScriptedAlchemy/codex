@@ -1,6 +1,7 @@
 use crate::config_profile::ConfigProfile;
 use crate::config_types::History;
 use crate::config_types::McpServerConfig;
+use crate::config_types::Notifications;
 use crate::config_types::ReasoningSummaryFormat;
 use crate::config_types::SandboxWorkspaceWrite;
 use crate::config_types::ShellEnvironmentPolicy;
@@ -9,6 +10,7 @@ use crate::config_types::Tui;
 use crate::config_types::UriBasedFileOpener;
 use crate::git_info::resolve_root_git_project_for_trust;
 use crate::model_family::ModelFamily;
+use crate::model_family::derive_default_model_family;
 use crate::model_family::find_family_for_model;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::built_in_model_providers;
@@ -35,9 +37,9 @@ use toml_edit::DocumentMut;
 use toml_edit::Item as TomlItem;
 use toml_edit::Table as TomlTable;
 
-const OPENAI_DEFAULT_MODEL: &str = "gpt-5";
-const OPENAI_DEFAULT_REVIEW_MODEL: &str = "gpt-5";
-pub const SWIFTFOX_MEDIUM_MODEL: &str = "swiftfox-medium";
+const OPENAI_DEFAULT_MODEL: &str = "gpt-5-codex";
+const OPENAI_DEFAULT_REVIEW_MODEL: &str = "gpt-5-codex";
+pub const GPT_5_CODEX_MEDIUM_MODEL: &str = "gpt-5-codex";
 
 /// Maximum number of bytes of the documentation that will be embedded. Larger
 /// files are *silently truncated* to this size so we do not take up too much of
@@ -52,7 +54,7 @@ pub struct Config {
     /// Optional override of model selection.
     pub model: String,
 
-    /// Model used specifically for review sessions. Defaults to "gpt-5".
+    /// Model used specifically for review sessions. Defaults to "gpt-5-codex".
     pub review_model: String,
 
     pub model_family: ModelFamily,
@@ -116,6 +118,10 @@ pub struct Config {
     /// If unset the feature is disabled.
     pub notify: Option<Vec<String>>,
 
+    /// TUI notifications preference. When set, the TUI will send OSC 9 notifications on approvals
+    /// and turn completions when not focused.
+    pub tui_notifications: Notifications,
+
     /// The directory that should be treated as the current working directory
     /// for the session. All relative paths inside the business-logic layer are
     /// resolved against this path.
@@ -163,9 +169,6 @@ pub struct Config {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
 
-    /// Experimental rollout resume path (absolute path to .jsonl; undocumented).
-    pub experimental_resume: Option<PathBuf>,
-
     /// Include an experimental plan tool that the model can use to update its current plan and status of each step.
     pub include_plan_tool: bool,
 
@@ -180,6 +183,10 @@ pub struct Config {
 
     /// If set to `true`, used only the experimental unified exec tool.
     pub use_experimental_unified_exec_tool: bool,
+
+    /// If set to `true`, use the experimental official Rust MCP client.
+    /// https://github.com/modelcontextprotocol/rust-sdk
+    pub use_experimental_use_rmcp_client: bool,
 
     /// Include the `view_image` tool that lets the agent attach a local image path to context.
     pub include_view_image_tool: bool,
@@ -349,6 +356,7 @@ pub fn write_global_mcp_servers(
 
     Ok(())
 }
+
 fn set_project_trusted_inner(doc: &mut DocumentMut, project_path: &Path) -> anyhow::Result<()> {
     // Ensure we render a human-friendly structure:
     //
@@ -684,14 +692,12 @@ pub struct ConfigToml {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
 
-    /// Experimental rollout resume path (absolute path to .jsonl; undocumented).
-    pub experimental_resume: Option<PathBuf>,
-
     /// Experimental path to a file whose contents replace the built-in BASE_INSTRUCTIONS.
     pub experimental_instructions_file: Option<PathBuf>,
 
     pub experimental_use_exec_command_tool: Option<bool>,
     pub experimental_use_unified_exec_tool: Option<bool>,
+    pub experimental_use_rmcp_client: Option<bool>,
 
     pub projects: Option<HashMap<String, ProjectConfig>>,
 
@@ -948,16 +954,8 @@ impl Config {
             .or(cfg.model)
             .unwrap_or_else(default_model);
 
-        let mut model_family = find_family_for_model(&model).unwrap_or_else(|| ModelFamily {
-            slug: model.clone(),
-            family: model.clone(),
-            needs_special_apply_patch_instructions: false,
-            supports_reasoning_summaries: false,
-            reasoning_summary_format: ReasoningSummaryFormat::None,
-            uses_local_shell_tool: false,
-            apply_patch_tool_type: None,
-            base_instructions: String::new(),
-        });
+        let mut model_family =
+            find_family_for_model(&model).unwrap_or_else(|| derive_default_model_family(&model));
 
         if let Some(supports_reasoning_summaries) = cfg.model_supports_reasoning_summaries {
             model_family.supports_reasoning_summaries = supports_reasoning_summaries;
@@ -980,8 +978,6 @@ impl Config {
                 .as_ref()
                 .and_then(|info| info.auto_compact_token_limit)
         });
-
-        let experimental_resume = cfg.experimental_resume;
 
         // Load base instructions override from a file if specified. If the
         // path is relative, resolve it against the effective cwd so the
@@ -1043,8 +1039,6 @@ impl Config {
                 .chatgpt_base_url
                 .or(cfg.chatgpt_base_url)
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
-
-            experimental_resume,
             include_plan_tool: include_plan_tool.unwrap_or(false),
             include_apply_patch_tool: include_apply_patch_tool.unwrap_or(false),
             tools_web_search_request,
@@ -1054,9 +1048,15 @@ impl Config {
             use_experimental_unified_exec_tool: cfg
                 .experimental_use_unified_exec_tool
                 .unwrap_or(false),
+            use_experimental_use_rmcp_client: cfg.experimental_use_rmcp_client.unwrap_or(false),
             include_view_image_tool,
             active_profile: active_profile_name,
             disable_paste_burst: cfg.disable_paste_burst.unwrap_or(false),
+            tui_notifications: cfg
+                .tui
+                .as_ref()
+                .map(|t| t.notifications.clone())
+                .unwrap_or_default(),
         };
         Ok(config)
     }
@@ -1172,7 +1172,6 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    use std::collections::BTreeMap;
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -1350,7 +1349,7 @@ startup_timeout_ms = 2500
         persist_model_selection(
             codex_home.path(),
             None,
-            "swiftfox-high",
+            "gpt-5-codex",
             Some(ReasoningEffort::High),
         )
         .await?;
@@ -1359,7 +1358,7 @@ startup_timeout_ms = 2500
             tokio::fs::read_to_string(codex_home.path().join(CONFIG_TOML_FILE)).await?;
         let parsed: ConfigToml = toml::from_str(&serialized)?;
 
-        assert_eq!(parsed.model.as_deref(), Some("swiftfox-high"));
+        assert_eq!(parsed.model.as_deref(), Some("gpt-5-codex"));
         assert_eq!(parsed.model_reasoning_effort, Some(ReasoningEffort::High));
 
         Ok(())
@@ -1373,7 +1372,7 @@ startup_timeout_ms = 2500
         tokio::fs::write(
             &config_path,
             r#"
-model = "gpt-5"
+model = "gpt-5-codex"
 model_reasoning_effort = "medium"
 
 [profiles.dev]
@@ -1413,7 +1412,7 @@ model = "gpt-4.1"
         persist_model_selection(
             codex_home.path(),
             Some("dev"),
-            "swiftfox-medium",
+            "gpt-5-codex",
             Some(ReasoningEffort::Medium),
         )
         .await?;
@@ -1426,7 +1425,7 @@ model = "gpt-4.1"
             .get("dev")
             .expect("profile should be created");
 
-        assert_eq!(profile.model.as_deref(), Some("swiftfox-medium"));
+        assert_eq!(profile.model.as_deref(), Some("gpt-5-codex"));
         assert_eq!(
             profile.model_reasoning_effort,
             Some(ReasoningEffort::Medium)
@@ -1448,7 +1447,7 @@ model = "gpt-4"
 model_reasoning_effort = "medium"
 
 [profiles.prod]
-model = "gpt-5"
+model = "gpt-5-codex"
 "#,
         )
         .await?;
@@ -1479,7 +1478,7 @@ model = "gpt-5"
                 .profiles
                 .get("prod")
                 .and_then(|profile| profile.model.as_deref()),
-            Some("gpt-5"),
+            Some("gpt-5-codex"),
         );
 
         Ok(())
@@ -1626,7 +1625,7 @@ model_verbosity = "high"
         assert_eq!(
             Config {
                 model: "o3".to_string(),
-                review_model: "gpt-5".to_string(),
+                review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
                 model_family: find_family_for_model("o3").expect("known model slug"),
                 model_context_window: Some(200_000),
                 model_max_output_tokens: Some(100_000),
@@ -1652,16 +1651,17 @@ model_verbosity = "high"
                 model_reasoning_summary: ReasoningSummary::Detailed,
                 model_verbosity: None,
                 chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-                experimental_resume: None,
                 base_instructions: None,
                 include_plan_tool: false,
                 include_apply_patch_tool: false,
                 tools_web_search_request: false,
                 use_experimental_streamable_shell_tool: false,
                 use_experimental_unified_exec_tool: false,
+                use_experimental_use_rmcp_client: false,
                 include_view_image_tool: true,
                 active_profile: Some("o3".to_string()),
                 disable_paste_burst: false,
+                tui_notifications: Default::default(),
             },
             o3_profile_config
         );
@@ -1684,7 +1684,7 @@ model_verbosity = "high"
         )?;
         let expected_gpt3_profile_config = Config {
             model: "gpt-3.5-turbo".to_string(),
-            review_model: "gpt-5".to_string(),
+            review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
             model_family: find_family_for_model("gpt-3.5-turbo").expect("known model slug"),
             model_context_window: Some(16_385),
             model_max_output_tokens: Some(4_096),
@@ -1710,16 +1710,17 @@ model_verbosity = "high"
             model_reasoning_summary: ReasoningSummary::default(),
             model_verbosity: None,
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-            experimental_resume: None,
             base_instructions: None,
             include_plan_tool: false,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
+            use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
             active_profile: Some("gpt3".to_string()),
             disable_paste_burst: false,
+            tui_notifications: Default::default(),
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -1757,7 +1758,7 @@ model_verbosity = "high"
         )?;
         let expected_zdr_profile_config = Config {
             model: "o3".to_string(),
-            review_model: "gpt-5".to_string(),
+            review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
             model_family: find_family_for_model("o3").expect("known model slug"),
             model_context_window: Some(200_000),
             model_max_output_tokens: Some(100_000),
@@ -1783,16 +1784,17 @@ model_verbosity = "high"
             model_reasoning_summary: ReasoningSummary::default(),
             model_verbosity: None,
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-            experimental_resume: None,
             base_instructions: None,
             include_plan_tool: false,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
+            use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
             active_profile: Some("zdr".to_string()),
             disable_paste_burst: false,
+            tui_notifications: Default::default(),
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);
@@ -1816,7 +1818,7 @@ model_verbosity = "high"
         )?;
         let expected_gpt5_profile_config = Config {
             model: "gpt-5".to_string(),
-            review_model: "gpt-5".to_string(),
+            review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
             model_family: find_family_for_model("gpt-5").expect("known model slug"),
             model_context_window: Some(272_000),
             model_max_output_tokens: Some(128_000),
@@ -1842,16 +1844,17 @@ model_verbosity = "high"
             model_reasoning_summary: ReasoningSummary::Detailed,
             model_verbosity: Some(Verbosity::High),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
-            experimental_resume: None,
             base_instructions: None,
             include_plan_tool: false,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
+            use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
             active_profile: Some("gpt5".to_string()),
             disable_paste_burst: false,
+            tui_notifications: Default::default(),
         };
 
         assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
@@ -1953,5 +1956,48 @@ trust_level = "trusted"
         assert_eq!(contents, expected);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod notifications_tests {
+    use crate::config_types::Notifications;
+    use serde::Deserialize;
+
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct TuiTomlTest {
+        notifications: Notifications,
+    }
+
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct RootTomlTest {
+        tui: TuiTomlTest,
+    }
+
+    #[test]
+    fn test_tui_notifications_true() {
+        let toml = r#"
+            [tui]
+            notifications = true
+        "#;
+        let parsed: RootTomlTest = toml::from_str(toml).expect("deserialize notifications=true");
+        assert!(matches!(
+            parsed.tui.notifications,
+            Notifications::Enabled(true)
+        ));
+    }
+
+    #[test]
+    fn test_tui_notifications_custom_array() {
+        let toml = r#"
+            [tui]
+            notifications = ["foo"]
+        "#;
+        let parsed: RootTomlTest =
+            toml::from_str(toml).expect("deserialize notifications=[\"foo\"]");
+        assert!(matches!(
+            parsed.tui.notifications,
+            Notifications::Custom(ref v) if v == &vec!["foo".to_string()]
+        ));
     }
 }

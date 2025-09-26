@@ -15,14 +15,13 @@ pub enum SlashCommand {
     Model,
     Approvals,
     Review,
-    ReviewBranch,
     New,
     Init,
     Compact,
+    Undo,
     Diff,
     Mention,
     Status,
-    Limits,
     Mcp,
     Logout,
     Quit,
@@ -37,13 +36,12 @@ impl SlashCommand {
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
-            SlashCommand::Review => "review my changes and find issues",
-            SlashCommand::ReviewBranch => "review changes on current branch vs base branch",
+            SlashCommand::Review => "review my current changes and find issues",
+            SlashCommand::Undo => "restore the workspace to the last Codex snapshot",
             SlashCommand::Quit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Status => "show current session configuration and token usage",
-            SlashCommand::Limits => "visualize weekly and hourly rate limits",
             SlashCommand::Model => "choose what model and reasoning effort to use",
             SlashCommand::Approvals => "choose what Codex can do without approval",
             SlashCommand::Mcp => "list configured MCP tools",
@@ -65,15 +63,14 @@ impl SlashCommand {
             SlashCommand::New
             | SlashCommand::Init
             | SlashCommand::Compact
+            | SlashCommand::Undo
             | SlashCommand::Model
             | SlashCommand::Approvals
             | SlashCommand::Review
-            | SlashCommand::ReviewBranch
             | SlashCommand::Logout => false,
             SlashCommand::Diff
             | SlashCommand::Mention
             | SlashCommand::Status
-            | SlashCommand::Limits
             | SlashCommand::Mcp
             | SlashCommand::Quit => true,
 
@@ -85,5 +82,20 @@ impl SlashCommand {
 
 /// Return all built-in commands in a Vec paired with their command string.
 pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
-    SlashCommand::iter().map(|c| (c.command(), c)).collect()
+    let show_beta_features = beta_features_enabled();
+
+    SlashCommand::iter()
+        .filter(|cmd| {
+            if *cmd == SlashCommand::Undo {
+                show_beta_features
+            } else {
+                true
+            }
+        })
+        .map(|c| (c.command(), c))
+        .collect()
+}
+
+fn beta_features_enabled() -> bool {
+    std::env::var_os("BETA_FEATURE").is_some()
 }

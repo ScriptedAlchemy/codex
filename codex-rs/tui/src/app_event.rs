@@ -5,11 +5,16 @@ use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
 
 use crate::history_cell::HistoryCell;
-use crate::review_branch::orchestrator::Orchestrator;
 
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewBranchMode {
+    Standard,
+    Deep,
+}
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
@@ -69,11 +74,11 @@ pub(crate) enum AppEvent {
     /// Forwarded conversation history snapshot from the current conversation.
     ConversationHistory(ConversationPathResponseEvent),
 
-    /// Start /review-branch orchestrated batching with a prepared orchestrator.
-    StartReviewBranchOrchestrator(Orchestrator),
-
     /// Open the branch picker option from the review popup.
-    OpenReviewBranchPicker(PathBuf),
+    OpenReviewBranchPicker {
+        cwd: PathBuf,
+        mode: ReviewBranchMode,
+    },
 
     /// Open the commit picker option from the review popup.
     OpenReviewCommitPicker(PathBuf),
@@ -81,6 +86,9 @@ pub(crate) enum AppEvent {
     /// Open the custom prompt option from the review popup.
     OpenReviewCustomPrompt,
 
-    /// Open the top-level review presets popup.
-    OpenReviewPopup,
+    /// Start a branch review (standard or deep) after selecting a base.
+    StartBranchReview {
+        base: String,
+        mode: ReviewBranchMode,
+    },
 }

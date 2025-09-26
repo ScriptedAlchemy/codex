@@ -12,7 +12,7 @@ use codex_core::RolloutRecorder;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
-use codex_core::config::SWIFTFOX_MEDIUM_MODEL;
+use codex_core::config::GPT_5_CODEX_MEDIUM_MODEL;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::config::persist_model_selection;
@@ -41,6 +41,7 @@ mod cli;
 mod clipboard_paste;
 pub mod custom_terminal;
 mod diff_render;
+mod exec_cell;
 mod exec_command;
 mod file_search;
 mod frames;
@@ -61,18 +62,17 @@ mod markdown_stream;
 mod new_model_popup;
 pub mod onboarding;
 mod pager_overlay;
-mod rate_limits_view;
 mod render;
 mod resume_picker;
 mod session_log;
 mod shimmer;
 mod slash_command;
+mod status;
 mod status_indicator_widget;
 mod streaming;
 mod text_formatting;
 mod tui;
 mod ui_consts;
-mod user_approval_widget;
 mod version;
 mod wrapping;
 
@@ -229,8 +229,9 @@ pub async fn run_main(
 
     // use RUST_LOG env var, default to info for codex crates.
     let env_filter = || {
-        EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("codex_core=info,codex_tui=info"))
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("codex_core=info,codex_tui=info,codex_rmcp_client=info")
+        })
     };
 
     // Build layered subscriber:
@@ -403,7 +404,7 @@ async fn run_ratatui_app(
         let switch_to_new_model = upgrade_decision == ModelUpgradeDecision::Switch;
 
         if switch_to_new_model {
-            config.model = SWIFTFOX_MEDIUM_MODEL.to_owned();
+            config.model = GPT_5_CODEX_MEDIUM_MODEL.to_owned();
             config.model_reasoning_effort = None;
             if let Err(e) = persist_model_selection(
                 &config.codex_home,
@@ -558,20 +559,25 @@ mod tests {
     use codex_core::auth::write_auth_json;
     use codex_core::token_data::IdTokenInfo;
     use codex_core::token_data::TokenData;
-    fn make_config() -> Config {
-        // Create a unique CODEX_HOME per test to isolate auth.json writes.
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    fn get_next_codex_home() -> PathBuf {
+        static NEXT_CODEX_HOME_ID: AtomicUsize = AtomicUsize::new(0);
         let mut codex_home = std::env::temp_dir();
         let unique_suffix = format!(
             "codex_tui_test_{}_{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            NEXT_CODEX_HOME_ID.fetch_add(1, Ordering::Relaxed)
         );
         codex_home.push(unique_suffix);
-        std::fs::create_dir_all(&codex_home).expect("create unique CODEX_HOME");
+        codex_home
+    }
 
+    fn make_config() -> Config {
+        // Create a unique CODEX_HOME per test to isolate auth.json writes.
+        let codex_home = get_next_codex_home();
+        std::fs::create_dir_all(&codex_home).expect("create unique CODEX_HOME");
         Config::load_from_base_config_with_overrides(
             ConfigToml::default(),
             ConfigOverrides::default(),
