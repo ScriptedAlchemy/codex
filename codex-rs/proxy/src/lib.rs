@@ -14,15 +14,6 @@ use axum::response::IntoResponse;
 use axum::response::Response as AxumResponse;
 use axum::routing::any;
 use axum::routing::get;
-use http::header::CONNECTION;
-use http::header::KEEP_ALIVE;
-use http::header::PROXY_AUTHENTICATE;
-use http::header::PROXY_AUTHORIZATION;
-// codespell:ignore TE
-use http::header::TE;
-use http::header::TRAILER;
-use http::header::TRANSFER_ENCODING;
-use http::header::UPGRADE;
 
 use clap::Args as ClapArgs;
 use codex_common::CliConfigOverrides;
@@ -279,16 +270,17 @@ fn copy_response_headers(src: &HeaderMap, dst: &mut HeaderMap, hop_by_hop: &Hash
 
 fn hop_by_hop_set() -> HashSet<HeaderName> {
     [
-        CONNECTION.clone(),
-        KEEP_ALIVE.clone(),
-        PROXY_AUTHENTICATE.clone(),
-        PROXY_AUTHORIZATION.clone(),
-        TE.clone(),
-        TRAILER.clone(),
-        TRANSFER_ENCODING.clone(),
-        UPGRADE.clone(),
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te", // codespell:ignore te
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
     ]
     .into_iter()
+    .filter_map(|s| HeaderName::from_lowercase(s.as_bytes()).ok())
     .collect()
 }
 

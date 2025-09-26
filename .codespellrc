@@ -3,4 +3,4 @@
 skip = .git*,vendor,*-lock.yaml,*.lock,.codespellrc,*test.ts,*.jsonl
 check-hidden = true
 ignore-regex = ^\s*"image/\S+": ".*|\b(afterAll)\b
-ignore-words-list = ratatui,ser,TE
+ignore-words-list = ratatui,ser,TE,te
