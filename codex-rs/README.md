@@ -196,5 +196,5 @@ resp = client.chat.completions.create(
 Notes
 
 - The proxy streams request and response bodies end‑to‑end, so large multipart uploads and SSE streams are supported.
-- Hop‑by‑hop headers (Connection, TE, etc.) are stripped; all other headers are forwarded.
+- Hop‑by‑hop headers (Connection, Transfer-Encoding, etc.) are stripped; all other headers are forwarded.
 - For browser apps, pass `--allow-cors-any` during local development.
