@@ -481,6 +481,7 @@ fn model_truncation_head_tail_by_lines() {
         aggregated_output: StreamOutput::new(full),
         duration: StdDuration::from_secs(1),
         timed_out: false,
+        was_cancelled: false,
     };
 
     let out = format_exec_output_str(&exec);
@@ -524,6 +525,7 @@ fn model_truncation_respects_byte_budget() {
         aggregated_output: StreamOutput::new(full.clone()),
         duration: StdDuration::from_secs(1),
         timed_out: false,
+        was_cancelled: false,
     };
 
     let out = format_exec_output_str(&exec);
@@ -555,6 +557,7 @@ fn includes_timed_out_message() {
         aggregated_output: StreamOutput::new("Command output".to_string()),
         duration: StdDuration::from_secs(1),
         timed_out: true,
+        was_cancelled: false,
     };
 
     let out = format_exec_output_str(&exec);

@@ -352,6 +352,7 @@ mod tests {
                 temp_home.path(),
                 &None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -458,6 +459,7 @@ mod macos_tests {
                 &SandboxPolicy::DangerFullAccess,
                 temp_home.path(),
                 &None,
+                None,
                 None,
             )
             .await

@@ -16,6 +16,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecCommandOutputDeltaEvent;
 use codex_core::protocol::ExecOutputStream;
 use codex_core::protocol::SandboxPolicy;
+use tokio_util::sync::CancellationToken;
 
 fn collect_stdout_events(rx: Receiver<Event>) -> Vec<u8> {
     let mut out = Vec::new();
@@ -68,6 +69,7 @@ async fn test_exec_stdout_stream_events_echo() {
         cwd.as_path(),
         &None,
         Some(stdout_stream),
+        None,
     )
     .await;
 
@@ -120,6 +122,7 @@ async fn test_exec_stderr_stream_events_echo() {
         cwd.as_path(),
         &None,
         Some(stdout_stream),
+        None,
     )
     .await;
 
@@ -175,6 +178,7 @@ async fn test_aggregated_output_interleaves_in_order() {
         cwd.as_path(),
         &None,
         None,
+        None,
     )
     .await
     .expect("process_exec_tool_call");
@@ -213,6 +217,7 @@ async fn test_exec_timeout_returns_partial_output() {
         cwd.as_path(),
         &None,
         None,
+        None,
     )
     .await;
 
@@ -226,4 +231,54 @@ async fn test_exec_timeout_returns_partial_output() {
     assert_eq!(output.aggregated_output.text, "before\n");
     assert!(output.duration >= Duration::from_millis(200));
     assert!(output.timed_out);
+}
+
+#[tokio::test]
+async fn test_exec_cancellation_preserves_partial_output() {
+    let cmd = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "printf 'before\\n'; sleep 5; printf 'after\\n'".to_string(),
+    ];
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let params = ExecParams {
+        command: cmd,
+        cwd: cwd.clone(),
+        timeout_ms: Some(10_000),
+        env: HashMap::new(),
+        with_escalated_permissions: None,
+        justification: None,
+    };
+
+    let policy = SandboxPolicy::new_read_only_policy();
+    let cancel_token = CancellationToken::new();
+    let canceller = cancel_token.clone();
+    let cancel_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        canceller.cancel();
+    });
+
+    let result = process_exec_tool_call(
+        params,
+        SandboxType::None,
+        &policy,
+        cwd.as_path(),
+        &None,
+        None,
+        Some(cancel_token),
+    )
+    .await
+    .expect("process_exec_tool_call");
+
+    cancel_task.await.expect("canceller task");
+
+    assert_ne!(result.exit_code, 0, "command should not exit successfully");
+    assert!(result.stdout.text.contains("before"));
+    assert!(!result.stdout.text.contains("after"));
+    assert!(
+        !result.timed_out,
+        "cancellation should not be treated as timeout"
+    );
+    assert!(result.was_cancelled, "cancellation flag should be set");
 }

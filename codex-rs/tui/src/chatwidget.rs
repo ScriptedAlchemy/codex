@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::Path;
@@ -208,7 +210,9 @@ pub(crate) struct ChatWidget {
     tui_notifications: Notifications,
     // Subagent focus and registry
     focused_subagent: Option<String>,
-    subagents: std::collections::BTreeMap<String, String>, // id -> description
+    subagents: BTreeMap<String, String>, // id -> description
+    subagent_tasks: BTreeSet<String>,
+    subagent_status_messages: BTreeMap<String, String>,
 }
 
 struct UserMessage {
@@ -319,6 +323,87 @@ impl ChatWidget {
         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
         self.full_reasoning_buffer.push_str("\n\n");
         self.reasoning_buffer.clear();
+    }
+
+    fn handle_task_started(&mut self, source_id: Option<&str>) {
+        if let Some(id) = source_id {
+            if self.subagents.contains_key(id) {
+                self.subagent_tasks.insert(id.to_string());
+                let default = self
+                    .subagents
+                    .get(id)
+                    .map(|desc| format!("Subagent {id}: {desc}"))
+                    .unwrap_or_else(|| format!("Subagent {id}: running"));
+                self.subagent_status_messages
+                    .entry(id.to_string())
+                    .or_insert(default);
+                self.update_subagent_status_panel();
+                return;
+            }
+        }
+        self.on_task_started();
+    }
+
+    fn handle_task_complete(
+        &mut self,
+        source_id: Option<&str>,
+        last_agent_message: Option<String>,
+    ) {
+        if let Some(id) = source_id {
+            if self.subagents.contains_key(id) {
+                self.subagent_tasks.remove(id);
+                self.subagent_status_messages.remove(id);
+                self.update_subagent_status_panel();
+                return;
+            }
+        }
+        self.on_task_complete(last_agent_message);
+    }
+
+    fn handle_turn_aborted(&mut self, source_id: Option<&str>, reason: TurnAbortReason) {
+        if let Some(id) = source_id {
+            if self.subagents.contains_key(id) {
+                self.subagent_tasks.remove(id);
+                self.subagent_status_messages
+                    .insert(id.to_string(), format!("Subagent {id}: interrupted"));
+                self.update_subagent_status_panel();
+                return;
+            }
+        }
+        match reason {
+            TurnAbortReason::Interrupted | TurnAbortReason::ReviewEnded => {
+                self.on_interrupted_turn(reason)
+            }
+            TurnAbortReason::Replaced => {
+                self.on_error("Turn aborted: replaced by a new task".to_owned())
+            }
+        }
+    }
+
+    fn update_subagent_status_panel(&mut self) {
+        let lines: Vec<String> = self
+            .subagent_tasks
+            .iter()
+            .filter_map(|id| self.subagent_status_messages.get(id))
+            .cloned()
+            .collect();
+
+        if self.bottom_pane.is_task_running() {
+            if !lines.is_empty() {
+                self.bottom_pane.set_status_messages(lines);
+            } else {
+                self.bottom_pane.set_status_messages(Vec::new());
+            }
+            return;
+        }
+
+        if let Some(first) = lines.first() {
+            self.bottom_pane.update_status_header(first.clone());
+            self.bottom_pane.set_status_messages(lines);
+        } else {
+            self.bottom_pane.set_status_messages(Vec::new());
+            self.bottom_pane.clear_status_if_idle();
+        }
     }
 
     // Raw reasoning uses the same flow as summarized reasoning
@@ -528,12 +613,23 @@ impl ChatWidget {
             if let Some((id, rest)) = stripped.split_once(' ') {
                 if rest.starts_with("opened:") {
                     let desc = rest.trim_start_matches("opened:").trim().to_string();
-                    self.subagents.insert(id.to_string(), desc);
+                    self.subagents.insert(id.to_string(), desc.clone());
+                    self.subagent_status_messages
+                        .insert(id.to_string(), format!("Subagent {id}: {desc}"));
+                    self.update_subagent_status_panel();
                 } else if rest.starts_with("ended") {
                     self.subagents.remove(id);
                     if self.focused_subagent.as_deref() == Some(id) {
                         self.focused_subagent = None;
                     }
+                    self.subagent_tasks.remove(id);
+                    self.subagent_status_messages.remove(id);
+                    self.update_subagent_status_panel();
+                } else if rest.starts_with("progress:") {
+                    let progress = rest.trim_start_matches("progress:").trim().to_string();
+                    self.subagent_status_messages
+                        .insert(id.to_string(), format!("Subagent {id}: {progress}"));
+                    self.update_subagent_status_panel();
                 }
             }
             self.add_to_history(history_cell::new_subagent_event(message));
@@ -820,7 +916,9 @@ impl ChatWidget {
             suppress_next_review_render: false,
             tui_notifications,
             focused_subagent: None,
-            subagents: std::collections::BTreeMap::new(),
+            subagents: BTreeMap::new(),
+            subagent_tasks: BTreeSet::new(),
+            subagent_status_messages: BTreeMap::new(),
         }
     }
 
@@ -885,7 +983,9 @@ impl ChatWidget {
             suppress_next_review_render: false,
             tui_notifications,
             focused_subagent: None,
-            subagents: std::collections::BTreeMap::new(),
+            subagents: BTreeMap::new(),
+            subagent_tasks: BTreeSet::new(),
+            subagent_status_messages: BTreeMap::new(),
         }
     }
 
@@ -1353,26 +1453,18 @@ impl ChatWidget {
                 self.on_agent_reasoning_final()
             }
             EventMsg::AgentReasoningSectionBreak(_) => self.on_reasoning_section_break(),
-            EventMsg::TaskStarted(_) => self.on_task_started(),
+            EventMsg::TaskStarted(_) => self.handle_task_started(id.as_deref()),
             EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
-                self.on_task_complete(last_agent_message)
+                self.handle_task_complete(id.as_deref(), last_agent_message)
             }
             EventMsg::TokenCount(ev) => {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
             EventMsg::Error(ErrorEvent { message }) => self.on_error(message),
-            EventMsg::TurnAborted(ev) => match ev.reason {
-                TurnAbortReason::Interrupted => {
-                    self.on_interrupted_turn(ev.reason);
-                }
-                TurnAbortReason::Replaced => {
-                    self.on_error("Turn aborted: replaced by a new task".to_owned())
-                }
-                TurnAbortReason::ReviewEnded => {
-                    self.on_interrupted_turn(ev.reason);
-                }
-            },
+            EventMsg::TurnAborted(ev) => {
+                self.handle_turn_aborted(id.as_deref(), ev.reason);
+            }
             EventMsg::PlanUpdate(update) => self.on_plan_update(update),
             EventMsg::ExecApprovalRequest(ev) => {
                 // For replayed events, synthesize an empty id (these should not occur).

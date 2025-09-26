@@ -1,22 +1,7 @@
-use super::*;
-use crate::app_event::AppEvent;
-use crate::app_event_sender::AppEventSender;
-use crate::bottom_pane::BottomPane;
-use crate::bottom_pane::BottomPaneParams;
-use crate::tui::FrameRequester;
-use codex_core::AuthManager;
-use codex_core::CodexAuth;
-use codex_core::config::Config;
-use codex_core::config::ConfigOverrides;
-use codex_core::config::ConfigToml;
-use codex_core::protocol::BackgroundEventEvent;
-use codex_core::protocol::Event;
-use codex_core::protocol::EventMsg;
-use codex_core::protocol::Op;
+use super::tests::{drain_insert_history, make_chatwidget_manual};
+use codex_core::protocol::{BackgroundEventEvent, Event, EventMsg, Op, TaskStartedEvent};
 use pretty_assertions::assert_eq;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use tokio::sync::mpsc::unbounded_channel;
 
 // Keep this test file focused on subagent-specific flows so the main tests.rs
 // file doesn’t grow unmanageably large.
@@ -73,80 +58,161 @@ fn subagent_direct_message_includes_images() {
     }
 }
 
-// --- Minimal helpers (duplicated to keep this file self-contained) ---
-fn make_chatwidget_manual() -> (
-    ChatWidget,
-    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-    tokio::sync::mpsc::UnboundedReceiver<Op>,
-) {
-    let (tx_raw, rx) = unbounded_channel::<AppEvent>();
-    let app_event_tx = AppEventSender::new(tx_raw);
-    let (op_tx, op_rx) = unbounded_channel::<Op>();
-    let cfg = test_config();
-    let bottom = BottomPane::new(BottomPaneParams {
-        app_event_tx: app_event_tx.clone(),
-        frame_requester: FrameRequester::test_dummy(),
-        has_input_focus: true,
-        enhanced_keys_supported: false,
-        placeholder_text: "Ask Codex to do anything".to_string(),
-        disable_paste_burst: false,
+#[test]
+fn parent_input_should_continue_during_subagent_work() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    // Announce a subagent so the widget tracks it.
+    chat.handle_codex_event(Event {
+        id: "root".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-plan opened: draft plan".to_string(),
+        }),
     });
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
-    let widget = ChatWidget {
-        app_event_tx,
-        codex_op_tx: op_tx,
-        bottom_pane: bottom,
-        active_exec_cell: None,
-        config: cfg.clone(),
-        auth_manager,
-        session_header: SessionHeader::new(cfg.model.clone()),
-        initial_user_message: None,
-        token_info: None,
-        rate_limit_snapshot: None,
-        rate_limit_warnings: RateLimitWarningState::default(),
-        stream: StreamController::new(cfg),
-        running_commands: HashMap::new(),
-        task_complete_pending: false,
-        interrupts: InterruptManager::new(),
-        reasoning_buffer: String::new(),
-        full_reasoning_buffer: String::new(),
-        conversation_id: None,
-        frame_requester: FrameRequester::test_dummy(),
-        show_welcome_banner: true,
-        queued_user_messages: std::collections::VecDeque::new(),
-        suppress_session_configured_redraw: false,
-        pending_notification: None,
-        is_review_mode: false,
-        suppress_next_review_render: false,
-        review_orchestrator: None,
-        tui_notifications: codex_core::config_types::Notifications::Enabled(false),
-        focused_subagent: None,
-        subagents: std::collections::BTreeMap::new(),
-    };
-    (widget, rx, op_rx)
+    drain_insert_history(&mut rx);
+
+    // Backend signals a running task (e.g., subagent turn still executing).
+    chat.handle_codex_event(Event {
+        id: "subagent-plan".into(),
+        msg: EventMsg::TaskStarted(TaskStartedEvent {
+            model_context_window: None,
+        }),
+    });
+    drain_insert_history(&mut rx);
+    assert!(!chat.bottom_pane.is_task_running());
+
+    // User attempts to keep chatting with the parent while subagent work continues.
+    chat.set_composer_text("Can you also summarize the README?".into());
+    chat.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+
+    // Expectation: parent turn stays interactive and dispatches immediately.
+    let mut op = op_rx
+        .try_recv()
+        .expect("expected parent message to dispatch immediately");
+    while matches!(op, Op::AddToHistory { .. }) {
+        op = op_rx
+            .try_recv()
+            .expect("expected UserInput after AddToHistory");
+    }
+    match op {
+        Op::UserInput { .. } => {}
+        other => panic!("unexpected op while parent should remain interactive: {other:?}"),
+    }
 }
 
-fn drain_insert_history(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-) -> Vec<Vec<ratatui::text::Line<'static>>> {
-    let mut out = Vec::new();
-    while let Ok(ev) = rx.try_recv() {
-        if let AppEvent::InsertHistoryCell(cell) = ev {
-            let mut lines = cell.display_lines(80);
-            if !cell.is_stream_continuation() && !out.is_empty() && !lines.is_empty() {
-                lines.insert(0, "".into());
-            }
-            out.push(lines)
+#[test]
+fn subagent_progress_should_update_status_banner() {
+    let (mut chat, mut rx, _) = make_chatwidget_manual();
+
+    chat.handle_codex_event(Event {
+        id: "root".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-plan opened: draft plan".to_string(),
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    // Start a task so the status indicator becomes visible.
+    chat.handle_codex_event(Event {
+        id: "subagent-plan".into(),
+        msg: EventMsg::TaskStarted(TaskStartedEvent {
+            model_context_window: None,
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    let header_before = chat
+        .bottom_pane
+        .status_header()
+        .expect("status indicator should be visible")
+        .to_string();
+    assert!(
+        header_before.contains("Subagent"),
+        "expected initial header to reflect subagent activity, got: {header_before}"
+    );
+
+    // Subagent emits a background progress update.
+    chat.handle_codex_event(Event {
+        id: "root".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-plan progress: enumerating repository".to_string(),
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    let header_after = chat
+        .bottom_pane
+        .status_header()
+        .expect("status indicator should remain visible")
+        .to_string();
+
+    assert!(
+        header_after.contains("Subagent"),
+        "expected status banner to include subagent progress, got: {header_after}"
+    );
+}
+
+#[test]
+fn esc_then_parent_message_should_dispatch_even_with_subagent_running() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    // Register a subagent and mark the turn as started.
+    chat.handle_codex_event(Event {
+        id: "root".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-async opened: async work".to_string(),
+        }),
+    });
+    drain_insert_history(&mut rx);
+    chat.handle_codex_event(Event {
+        id: "subagent-async".into(),
+        msg: EventMsg::TaskStarted(TaskStartedEvent {
+            model_context_window: None,
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    // User presses Esc, interrupting the parent turn.
+    chat.handle_codex_event(Event {
+        id: "root".into(),
+        msg: EventMsg::TurnAborted(codex_core::protocol::TurnAbortedEvent {
+            reason: codex_core::protocol::TurnAbortReason::Interrupted,
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    // Subagent continues emitting progress, triggering another TaskStarted.
+    chat.handle_codex_event(Event {
+        id: "subagent-async".into(),
+        msg: EventMsg::TaskStarted(TaskStartedEvent {
+            model_context_window: None,
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    // User attempts to send a fresh parent message.
+    chat.set_composer_text("resuming conversation".into());
+    chat.handle_key_event(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+
+    // Expect dispatch; current behaviour leaves the queue empty.
+    let mut op = op_rx
+        .try_recv()
+        .expect("expected parent message to dispatch immediately after Esc");
+    while matches!(op, Op::AddToHistory { .. }) {
+        op = op_rx
+            .try_recv()
+            .expect("expected UserInput after AddToHistory");
+    }
+    match op {
+        Op::UserInput { .. } => {}
+        other => {
+            panic!("unexpected op while parent should remain interactive after Esc: {other:?}")
         }
     }
-    out
-}
-
-fn test_config() -> Config {
-    Config::load_from_base_config_with_overrides(
-        ConfigToml::default(),
-        ConfigOverrides::default(),
-        std::env::temp_dir(),
-    )
-    .expect("config")
 }

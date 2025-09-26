@@ -34,6 +34,8 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
+use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -282,6 +284,8 @@ struct State {
     history: ConversationHistory,
     token_info: Option<TokenUsageInfo>,
     latest_rate_limits: Option<RateLimitSnapshotEvent>,
+    current_exec_cancel_token: Option<CancellationToken>,
+    task_cancelled: bool,
 }
 
 /// Context for an initialized model agent
@@ -560,7 +564,36 @@ impl Session {
         if let Some(current_task) = state.current_task.take() {
             current_task.abort(TurnAbortReason::Replaced);
         }
+        state.task_cancelled = false;
         state.current_task = Some(task);
+    }
+
+    async fn set_exec_cancel_token(&self, token: CancellationToken) {
+        let mut state = self.state.lock().await;
+        state.current_exec_cancel_token = Some(token);
+    }
+
+    async fn clear_exec_cancel_token(&self) {
+        let mut state = self.state.lock().await;
+        state.current_exec_cancel_token = None;
+    }
+
+    async fn cancel_current_exec(&self) {
+        let token = {
+            let state = self.state.lock().await;
+            state.current_exec_cancel_token.clone()
+        };
+        if let Some(token) = token {
+            token.cancel();
+        }
+    }
+
+    fn cancel_current_exec_sync(&self) {
+        if let Ok(state) = self.state.try_lock()
+            && let Some(token) = state.current_exec_cancel_token.clone()
+        {
+            token.cancel();
+        }
     }
 
     async fn open_subagent(
@@ -909,6 +942,7 @@ impl Session {
             duration,
             exit_code,
             timed_out: _,
+            was_cancelled: _,
         } = output;
         // Send full stdout/stderr to clients; do not truncate.
         let stdout = stdout.text.clone();
@@ -972,6 +1006,8 @@ impl Session {
         self.on_exec_command_begin(turn_diff_tracker, begin_ctx.clone())
             .await;
 
+        let cancel_token = CancellationToken::new();
+        self.set_exec_cancel_token(cancel_token.clone()).await;
         let result = process_exec_tool_call(
             exec_args.params,
             exec_args.sandbox_type,
@@ -979,8 +1015,10 @@ impl Session {
             exec_args.sandbox_cwd,
             exec_args.codex_linux_sandbox_exe,
             exec_args.stdout_stream,
+            Some(cancel_token),
         )
         .await;
+        self.clear_exec_cancel_token().await;
 
         let output_stderr;
         let borrowed: &ExecToolCallOutput = match &result {
@@ -994,6 +1032,7 @@ impl Session {
                     aggregated_output: StreamOutput::new(get_error_message_ui(e)),
                     duration: Duration::default(),
                     timed_out: false,
+                    was_cancelled: false,
                 };
                 &output_stderr
             }
@@ -1078,9 +1117,11 @@ impl Session {
 
     pub async fn interrupt_task(&self) {
         info!("interrupt received: abort current task, if any");
+        self.cancel_current_exec().await;
         let mut state = self.state.lock().await;
         state.pending_approvals.clear();
         state.pending_input.clear();
+        state.task_cancelled = true;
         if let Some(task) = state.current_task.take() {
             task.abort(TurnAbortReason::Interrupted);
         }
@@ -1090,10 +1131,12 @@ impl Session {
         if let Ok(mut state) = self.state.try_lock() {
             state.pending_approvals.clear();
             state.pending_input.clear();
+            state.task_cancelled = true;
             if let Some(task) = state.current_task.take() {
                 task.abort(TurnAbortReason::Interrupted);
             }
         }
+        self.cancel_current_exec_sync();
     }
 
     /// Spawn the configured notifier (if any) with the given JSON payload as
@@ -1159,7 +1202,25 @@ pub(crate) struct AgentTask {
     sess: Arc<Session>,
     sub_id: String,
     handle: AbortHandle,
+    cancel_token: CancellationToken,
+    finished_rx: oneshot::Receiver<()>,
     kind: AgentTaskKind,
+}
+
+struct TaskCompletionGuard(Option<oneshot::Sender<()>>);
+
+impl TaskCompletionGuard {
+    fn new(tx: oneshot::Sender<()>) -> Self {
+        Self(Some(tx))
+    }
+}
+
+impl Drop for TaskCompletionGuard {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
 }
 
 impl AgentTask {
@@ -1169,16 +1230,25 @@ impl AgentTask {
         sub_id: String,
         input: Vec<InputItem>,
     ) -> Self {
+        let cancel_token = CancellationToken::new();
+        let (finished_tx, finished_rx) = oneshot::channel();
         let handle = {
             let sess = sess.clone();
             let sub_id = sub_id.clone();
             let tc = Arc::clone(&turn_context);
-            tokio::spawn(async move { run_task(sess, tc, sub_id, input).await }).abort_handle()
+            let cancel = cancel_token.clone();
+            tokio::spawn(async move {
+                let _guard = TaskCompletionGuard::new(finished_tx);
+                run_task(sess, tc, sub_id, input, cancel).await;
+            })
+            .abort_handle()
         };
         Self {
             sess,
             sub_id,
             handle,
+            cancel_token,
+            finished_rx,
             kind: AgentTaskKind::Regular,
         }
     }
@@ -1189,16 +1259,25 @@ impl AgentTask {
         sub_id: String,
         input: Vec<InputItem>,
     ) -> Self {
+        let cancel_token = CancellationToken::new();
+        let (finished_tx, finished_rx) = oneshot::channel();
         let handle = {
             let sess = sess.clone();
             let sub_id = sub_id.clone();
             let tc = Arc::clone(&turn_context);
-            tokio::spawn(async move { run_task(sess, tc, sub_id, input).await }).abort_handle()
+            let cancel = cancel_token.clone();
+            tokio::spawn(async move {
+                let _guard = TaskCompletionGuard::new(finished_tx);
+                run_task(sess, tc, sub_id, input, cancel).await;
+            })
+            .abort_handle()
         };
         Self {
             sess,
             sub_id,
             handle,
+            cancel_token,
+            finished_rx,
             kind: AgentTaskKind::Review,
         }
     }
@@ -1210,11 +1289,14 @@ impl AgentTask {
         input: Vec<InputItem>,
         compact_instructions: String,
     ) -> Self {
+        let cancel_token = CancellationToken::new();
+        let (finished_tx, finished_rx) = oneshot::channel();
         let handle = {
             let sess = sess.clone();
             let sub_id = sub_id.clone();
             let tc = Arc::clone(&turn_context);
             tokio::spawn(async move {
+                let _guard = TaskCompletionGuard::new(finished_tx);
                 compact::run_compact_task(sess, tc, sub_id, input, compact_instructions).await
             })
             .abort_handle()
@@ -1223,26 +1305,36 @@ impl AgentTask {
             sess,
             sub_id,
             handle,
+            cancel_token,
+            finished_rx,
             kind: AgentTaskKind::Compact,
         }
     }
 
     fn abort(self, reason: TurnAbortReason) {
-        // TOCTOU?
-        if !self.handle.is_finished() {
-            self.handle.abort();
+        let AgentTask {
+            sess,
+            sub_id,
+            handle,
+            cancel_token,
+            finished_rx,
+            kind,
+        } = self;
+        cancel_token.cancel();
+        tokio::spawn(async move {
+            let wait_result = timeout(Duration::from_millis(750), finished_rx).await;
+            if !matches!(wait_result, Ok(Ok(()))) {
+                handle.abort();
+            }
+            if kind == AgentTaskKind::Review {
+                exit_review_mode(sess.clone(), sub_id.clone(), None).await;
+            }
             let event = Event {
-                id: self.sub_id.clone(),
+                id: sub_id.clone(),
                 msg: EventMsg::TurnAborted(TurnAbortedEvent { reason }),
             };
-            let sess = self.sess;
-            tokio::spawn(async move {
-                if self.kind == AgentTaskKind::Review {
-                    exit_review_mode(sess.clone(), self.sub_id, None).await;
-                }
-                sess.send_event(event).await;
-            });
-        }
+            sess.send_event(event).await;
+        });
     }
 }
 
@@ -1770,6 +1862,7 @@ async fn run_task(
     turn_context: Arc<TurnContext>,
     sub_id: String,
     input: Vec<InputItem>,
+    cancel_token: CancellationToken,
 ) {
     if input.is_empty() {
         return;
@@ -1857,6 +1950,9 @@ async fn run_task(
         .await
         {
             Ok(turn_output) => {
+                if cancel_token.is_cancelled() {
+                    break;
+                }
                 let TurnRunResult {
                     processed_items,
                     total_token_usage,
@@ -2013,6 +2109,9 @@ async fn run_task(
                 continue;
             }
             Err(e) => {
+                if cancel_token.is_cancelled() {
+                    break;
+                }
                 info!("Turn error: {e:#}");
                 let event = Event {
                     id: sub_id.clone(),
@@ -2025,6 +2124,11 @@ async fn run_task(
                 break;
             }
         }
+    }
+
+    if cancel_token.is_cancelled() {
+        sess.remove_task(&sub_id).await;
+        return;
     }
 
     // If this was a review thread and we have a final assistant message,
