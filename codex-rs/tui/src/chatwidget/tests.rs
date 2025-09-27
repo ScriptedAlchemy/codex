@@ -1474,6 +1474,10 @@ fn pr_checks_failure_sends_fix_prompt() {
                         text.contains("stderr:\n```\ntest panic"),
                         "prompt should include stderr snippet"
                     );
+                    assert!(
+                        text.contains("run the `run_pr_checks` tool"),
+                        "prompt should point to run_pr_checks tool"
+                    );
                 }
                 other => panic!("unexpected input item: {other:?}"),
             }
@@ -1512,8 +1516,8 @@ fn pr_checks_spawn_error_reports_issue() {
                         "prompt should include spawn error"
                     );
                     assert!(
-                        text.contains("rerun /pr-checks"),
-                        "prompt should advise rerunning"
+                        text.contains("run the `run_pr_checks` tool"),
+                        "prompt should point to run_pr_checks tool"
                     );
                 }
                 other => panic!("unexpected input item: {other:?}"),

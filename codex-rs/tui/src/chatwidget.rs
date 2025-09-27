@@ -1687,7 +1687,7 @@ impl ChatWidget {
             message.push_str(&truncated);
             message.push_str("\n```");
             message.push_str(
-                "\n\nAfter addressing the problems, rerun /pr-checks to verify the checks succeed.",
+                "\n\nAfter addressing the problems, run the `run_pr_checks` tool to verify the checks succeed.",
             );
             self.submit_text_message(message);
             return;
@@ -1707,7 +1707,7 @@ impl ChatWidget {
         }
 
         message.push_str(
-            "\n\nAfter addressing the problems, rerun /pr-checks to verify the checks succeed.",
+            "\n\nAfter addressing the problems, run the `run_pr_checks` tool to verify the checks succeed.",
         );
 
         self.submit_text_message(message);
