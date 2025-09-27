@@ -46,6 +46,11 @@ mod exec_command;
 mod file_search;
 mod frames;
 mod get_git_diff;
+mod review_branch {
+    pub mod chunker;
+    pub mod orchestrator;
+}
+mod git_branch_summary;
 mod history_cell;
 pub mod insert_history;
 mod key_hint;
@@ -56,6 +61,7 @@ mod markdown_stream;
 mod new_model_popup;
 pub mod onboarding;
 mod pager_overlay;
+mod pr_checks;
 mod render;
 mod resume_picker;
 mod session_log;

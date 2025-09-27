@@ -15,6 +15,7 @@ use codex_cli::login::run_logout;
 use codex_cli::proto;
 use codex_common::CliConfigOverrides;
 use codex_exec::Cli as ExecCli;
+use codex_proxy::ProxyCommand as ProxyCli;
 use codex_responses_api_proxy::Args as ResponsesApiProxyArgs;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli as TuiCli;
@@ -67,6 +68,10 @@ enum Subcommand {
 
     /// [experimental] Run Codex as an MCP server and manage MCP servers.
     Mcp(McpCli),
+
+    /// Run the HTTP passthrough proxy.
+    #[clap(visible_alias = "http")]
+    Proxy(ProxyCli),
 
     /// Run the Protocol stream via stdin/stdout
     #[clap(visible_alias = "p")]
@@ -263,6 +268,10 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             // Propagate any root-level config overrides (e.g. `-c key=value`).
             prepend_config_flags(&mut mcp_cli.config_overrides, root_config_overrides.clone());
             mcp_cli.run(codex_linux_sandbox_exe).await?;
+        }
+        Some(Subcommand::Proxy(mut proxy_cli)) => {
+            prepend_config_flags(&mut proxy_cli.config, root_config_overrides.clone());
+            codex_proxy::run(proxy_cli).await?;
         }
         Some(Subcommand::Resume(ResumeCommand {
             session_id,

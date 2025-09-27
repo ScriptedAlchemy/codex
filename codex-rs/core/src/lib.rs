@@ -58,6 +58,7 @@ pub mod model_family;
 mod openai_model_info;
 mod openai_tools;
 pub mod plan_tool;
+mod pr_checks_tool;
 pub mod project_doc;
 mod rollout;
 pub(crate) mod safety;

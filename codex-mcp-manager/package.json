@@ -1,0 +1,41 @@
+{
+  "name": "codex-mcp-manager",
+  "version": "0.1.0",
+  "description": "Codex MCP manager proxy providing numeric conversation ids and orchestration helpers.",
+  "type": "module",
+  "bin": {
+    "codex-mcp-manager": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist",
+    "start": "npm run build && node ./dist/index.js && echo 'MCP Manager started'",
+    "test": "npm run build && timeout 5s tsx test/test-mcp.ts && timeout 5s tsx test/test-direct.ts && tsx test/test-model-config.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.1",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.24.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.8.0",
+    "rimraf": "^5.0.10",
+    "tsx": "^4.17.0",
+    "typescript": "^5.6.3"
+  },
+  "keywords": [
+    "codex",
+    "mcp",
+    "manager"
+  ],
+  "license": "Apache-2.0"
+}

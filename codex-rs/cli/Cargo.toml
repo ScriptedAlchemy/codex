@@ -27,6 +27,7 @@ codex-login = { workspace = true }
 codex-mcp-server = { workspace = true }
 codex-protocol = { workspace = true }
 codex-protocol-ts = { workspace = true }
+codex-proxy = { workspace = true }
 codex-responses-api-proxy = { workspace = true }
 codex-tui = { workspace = true }
 ctor = { workspace = true }
@@ -53,7 +54,4 @@ libc = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-assert_cmd = { workspace = true }
-predicates = { workspace = true }
-pretty_assertions = { workspace = true }
-tempfile = { workspace = true }
+# Retain empty table for future integration tests; dependencies will be added as needed.

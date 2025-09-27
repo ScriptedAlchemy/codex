@@ -2392,6 +2392,42 @@ async fn handle_function_call(
 
             Ok("attached local image path".to_string())
         }
+        "run_pr_checks" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct RunPrChecksArgs {}
+
+            // Validate arguments are an empty object to surface schema violations clearly.
+            let _args: RunPrChecksArgs = serde_json::from_str(&arguments).map_err(|e| {
+                FunctionCallError::RespondToModel(format!(
+                    "failed to parse function arguments: {e:?}"
+                ))
+            })?;
+
+            let exec_params = ExecParams {
+                command: vec![
+                    "gh".to_string(),
+                    "pr".to_string(),
+                    "checks".to_string(),
+                    "--watch".to_string(),
+                ],
+                cwd: turn_context.cwd.clone(),
+                timeout_ms: None,
+                env: HashMap::new(),
+                with_escalated_permissions: None,
+                justification: None,
+            };
+
+            handle_container_exec_with_params(
+                exec_params,
+                sess,
+                turn_context,
+                turn_diff_tracker,
+                sub_id,
+                call_id,
+            )
+            .await
+        }
         "apply_patch" => {
             let args: ApplyPatchToolArgs = serde_json::from_str(&arguments).map_err(|e| {
                 FunctionCallError::RespondToModel(format!(
