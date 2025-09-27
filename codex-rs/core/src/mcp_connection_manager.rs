@@ -186,7 +186,8 @@ impl McpConnectionManager {
             // Validate server name before spawning
             if !is_valid_mcp_server_name(&server_name) {
                 let error = anyhow::anyhow!(
-                    "invalid server name '{server_name}': must match pattern ^[a-zA-Z0-9_-]+$"
+                    "invalid server name '{}': must match pattern ^[a-zA-Z0-9_-]+$",
+                    server_name
                 );
                 errors.insert(server_name, error);
                 continue;

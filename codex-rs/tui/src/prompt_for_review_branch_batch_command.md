@@ -7,33 +7,19 @@ Files:
 {file_list}
 
 Instructions:
-
 - For any file you inspect, fetch minimal hunks only: `git diff --no-color -U0 {base}...HEAD -- -- <path>`.
 - Scope findings ONLY to code overlapping the branch diff.
 - Follow the existing review schema from the system prompt; output ONLY the JSON object.
 - Be concise; do not paste full diffs; cite exact `file:line` ranges.
 - If two candidate issues are effectively the same, prefer the higher-confidence one.
 
-Static checks for this batch (run, don’t auto‑fix):
-
-- Do NOT run build, serve, or long‑running dev commands. Only use lightweight linters/type‑checkers.
-- Prefer running direct tool CLIs; avoid package scripts that may invoke builds.
-- Identify affected subprojects from the files in this batch and run the project’s checker/linter only for those parts.
-  - Rust: `cargo clippy -p <crate> --tests --all-features` (no `--fix`) and/or `cargo check -p <crate>` if available.
-  - JS/TS: `eslint` and `tsc --noEmit` if available; do not run `npm run build`, `vite dev`, `next dev`, etc.
-  - Python: `ruff`/`flake8` and `mypy` for the batch’s modules.
-- Record any errors/warnings overlapping this batch; convert substantive ones into findings (cite rule/lint), otherwise summarize under `overall_explanation`.
-- If a checker is unavailable or cannot run, state exactly what you tried and why, then proceed.
-
 Skip low-value files unless there is a direct, non-speculative impact — and do not fetch diffs for them:
-
 - Lockfiles (e.g., `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`).
 - Generated/vendored or minified assets; images and other binaries.
 - Doc-only changes that do not affect correctness/security.
-  If such files appear in the batch list, omit them and continue; only fetch a minimal hunk for them if you have a concrete, high-confidence reason that they affect correctness/security.
+If such files appear in the batch list, omit them and continue; only fetch a minimal hunk for them if you have a concrete, high-confidence reason that they affect correctness/security.
 
 Context exploration (allowed, but keep it tight):
-
 - If a finding depends on behavior in a related file not listed above (e.g., a called function or config include), you MAY fetch a minimal hunk for that related file to confirm the conclusion.
 - Prefer targeted commands (e.g., `git diff -U0 {base}...HEAD -- -- related/path`, `git show {base}:related/path` for a few lines) over broad scans.
 - Do not expand scope beyond what is necessary to verify the specific finding.
