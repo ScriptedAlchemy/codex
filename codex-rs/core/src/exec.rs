@@ -155,7 +155,9 @@ pub async fn process_exec_tool_call(
     };
     let duration = start.elapsed();
     match raw_output_result {
-        Ok(mut raw_output) => {
+        Ok(raw_output) => {
+            #[cfg_attr(not(target_family = "unix"), allow(unused_mut))]
+            let mut raw_output = raw_output;
             #[allow(unused_mut)]
             let mut timed_out = raw_output.timed_out;
             let was_cancelled = raw_output.was_cancelled;
