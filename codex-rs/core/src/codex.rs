@@ -467,6 +467,7 @@ impl Session {
                 use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
                 include_view_image_tool: config.include_view_image_tool,
                 include_subagent_tool: config.include_subagent_tool,
+                include_pr_checks_tool: true,
                 experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
             }),
             user_instructions,
@@ -1234,6 +1235,7 @@ async fn submission_loop(
                     use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
                     include_view_image_tool: config.include_view_image_tool,
                     include_subagent_tool: config.include_subagent_tool,
+                    include_pr_checks_tool: true,
                     experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
                 });
 
@@ -1323,6 +1325,7 @@ async fn submission_loop(
                                 .use_experimental_streamable_shell_tool,
                             include_view_image_tool: config.include_view_image_tool,
                             include_subagent_tool: config.include_subagent_tool,
+                            include_pr_checks_tool: true,
                             experimental_unified_exec_tool: config
                                 .use_experimental_unified_exec_tool,
                         }),
@@ -1545,6 +1548,7 @@ async fn spawn_review_thread(
         use_streamable_shell_tool: false,
         include_view_image_tool: false,
         include_subagent_tool: false,
+        include_pr_checks_tool: false,
         experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
     });
 
@@ -3666,6 +3670,7 @@ mod tests {
             use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
             include_view_image_tool: config.include_view_image_tool,
             include_subagent_tool: config.include_subagent_tool,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
         });
         let turn_context = TurnContext {
@@ -3744,6 +3749,7 @@ mod tests {
             use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
             include_view_image_tool: config.include_view_image_tool,
             include_subagent_tool: config.include_subagent_tool,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
         });
         let turn_context = Arc::new(TurnContext {

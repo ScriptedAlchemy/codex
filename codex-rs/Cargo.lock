@@ -1074,6 +1074,7 @@ dependencies = [
  "codex-ollama",
  "codex-protocol",
  "color-eyre",
+ "core_test_support",
  "crossterm",
  "diffy",
  "dirs",
@@ -1083,6 +1084,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "mcp-types",
+ "once_cell",
  "path-clean",
  "pathdiff",
  "pretty_assertions",
@@ -1106,7 +1108,9 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.2.1",
  "url",
+ "uuid",
  "vt100",
+ "wiremock",
 ]
 
 [[package]]

@@ -69,6 +69,7 @@ pub(crate) struct ToolsConfig {
     pub web_search_request: bool,
     pub include_view_image_tool: bool,
     pub include_subagent_tool: bool,
+    pub include_pr_checks_tool: bool,
     pub experimental_unified_exec_tool: bool,
 }
 
@@ -80,6 +81,7 @@ pub(crate) struct ToolsConfigParams<'a> {
     pub(crate) use_streamable_shell_tool: bool,
     pub(crate) include_view_image_tool: bool,
     pub(crate) include_subagent_tool: bool,
+    pub(crate) include_pr_checks_tool: bool,
     pub(crate) experimental_unified_exec_tool: bool,
 }
 
@@ -93,6 +95,7 @@ impl ToolsConfig {
             use_streamable_shell_tool,
             include_view_image_tool,
             include_subagent_tool,
+            include_pr_checks_tool,
             experimental_unified_exec_tool,
         } = params;
         let shell_type = if *use_streamable_shell_tool {
@@ -122,6 +125,7 @@ impl ToolsConfig {
             web_search_request: *include_web_search_request,
             include_view_image_tool: *include_view_image_tool,
             include_subagent_tool: *include_subagent_tool,
+            include_pr_checks_tool: *include_pr_checks_tool,
             experimental_unified_exec_tool: *experimental_unified_exec_tool,
         }
     }
@@ -736,7 +740,9 @@ pub(crate) fn get_openai_tools(
         tools.push(PLAN_TOOL.clone());
     }
 
-    tools.push(PR_CHECKS_TOOL.clone());
+    if config.include_pr_checks_tool {
+        tools.push(PR_CHECKS_TOOL.clone());
+    }
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
         match apply_patch_tool_type {
@@ -828,6 +834,7 @@ mod tests {
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
             include_subagent_tool: false,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: true,
         });
         let tools = get_openai_tools(&config, Some(HashMap::new()));
@@ -856,6 +863,7 @@ mod tests {
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
             include_subagent_tool: true,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: true,
         });
         let tools = get_openai_tools(&config, Some(HashMap::new()));
@@ -888,6 +896,7 @@ mod tests {
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
             include_subagent_tool: false,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: true,
         });
         let tools = get_openai_tools(&config, Some(HashMap::new()));
@@ -915,6 +924,7 @@ mod tests {
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
             include_subagent_tool: false,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: true,
         });
         let tools = get_openai_tools(
@@ -1021,6 +1031,7 @@ mod tests {
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
             include_subagent_tool: false,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: true,
         });
 
@@ -1099,6 +1110,7 @@ mod tests {
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
             include_subagent_tool: false,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: true,
         });
 
@@ -1167,6 +1179,7 @@ mod tests {
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
             include_subagent_tool: false,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: true,
         });
 
@@ -1230,6 +1243,7 @@ mod tests {
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
             include_subagent_tool: false,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: true,
         });
 
@@ -1296,6 +1310,7 @@ mod tests {
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
             include_subagent_tool: false,
+            include_pr_checks_tool: true,
             experimental_unified_exec_tool: true,
         });
 
