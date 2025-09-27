@@ -18,6 +18,7 @@ members = [
     "ollama",
     "protocol",
     "protocol-ts",
+    "proxy",
     "rmcp-client",
     "responses-api-proxy",
     "tui",
@@ -50,6 +51,7 @@ codex-mcp-client = { path = "mcp-client" }
 codex-mcp-server = { path = "mcp-server" }
 codex-ollama = { path = "ollama" }
 codex-protocol = { path = "protocol" }
+codex-proxy = { path = "proxy" }
 codex-rmcp-client = { path = "rmcp-client" }
 codex-protocol-ts = { path = "protocol-ts" }
 codex-responses-api-proxy = { path = "responses-api-proxy" }
@@ -157,6 +159,7 @@ webbrowser = "1.0"
 which = "6"
 wildmatch = "2.5.0"
 wiremock = "0.6"
+once_cell = "1"
 zeroize = "1.8.1"
 
 [workspace.lints]

@@ -15,6 +15,7 @@ pub enum SlashCommand {
     Model,
     Approvals,
     Review,
+    PrChecks,
     New,
     Init,
     Compact,
@@ -37,6 +38,7 @@ impl SlashCommand {
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
+            SlashCommand::PrChecks => "run PR checks and auto-fix failures",
             SlashCommand::Undo => "restore the workspace to the last Codex snapshot",
             SlashCommand::Quit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
@@ -67,6 +69,7 @@ impl SlashCommand {
             | SlashCommand::Model
             | SlashCommand::Approvals
             | SlashCommand::Review
+            | SlashCommand::PrChecks
             | SlashCommand::Logout => false,
             SlashCommand::Diff
             | SlashCommand::Mention
@@ -97,5 +100,16 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
 }
 
 fn beta_features_enabled() -> bool {
-    std::env::var_os("BETA_FEATURE").is_some()
+    match std::env::var("BETA_FEATURE") {
+        Ok(raw) => {
+            let value = raw.trim().to_ascii_lowercase();
+            if value.is_empty() {
+                true
+            } else {
+                !matches!(value.as_str(), "0" | "false" | "no" | "off")
+            }
+        }
+        Err(std::env::VarError::NotPresent) => true,
+        Err(std::env::VarError::NotUnicode(_)) => true,
+    }
 }

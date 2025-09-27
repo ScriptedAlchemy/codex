@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -56,8 +59,11 @@ use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
+use tracing::error;
+use tracing::warn;
 
 use crate::app_event::AppEvent;
+use crate::app_event::ReviewBranchMode;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
@@ -74,6 +80,7 @@ use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::new_active_exec_command;
 use crate::get_git_diff::get_git_diff;
+use crate::git_branch_summary::branch_shortstat;
 use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
@@ -81,6 +88,11 @@ use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PatchEventType;
 use crate::history_cell::RateLimitSnapshotDisplay;
 use crate::markdown::append_markdown;
+use crate::pr_checks::PrChecksOutcome;
+use crate::pr_checks::run_pr_checks;
+use crate::review_branch::chunker::ChunkLimits;
+use crate::review_branch::orchestrator::Orchestrator;
+use crate::review_branch::orchestrator::OrchestratorStage;
 use crate::slash_command::SlashCommand;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
@@ -94,8 +106,7 @@ use self::agent::spawn_agent_from_existing;
 mod session_header;
 use self::session_header::SessionHeader;
 use crate::streaming::controller::StreamController;
-use std::path::Path;
-
+use anyhow::Result as AnyResult;
 use chrono::Local;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
@@ -114,6 +125,20 @@ use codex_git_tooling::create_ghost_commit;
 use codex_git_tooling::restore_ghost_commit;
 
 const MAX_TRACKED_GHOST_COMMITS: usize = 20;
+const REVIEW_BRANCH_PROMPT_TMPL: &str = include_str!("prompt_for_review_branch_command.md");
+const REVIEW_BRANCH_BATCH_PROMPT_TMPL: &str =
+    include_str!("prompt_for_review_branch_batch_command.md");
+const REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL: &str =
+    include_str!("prompt_for_review_branch_consolidation.md");
+const REVIEW_BRANCH_LIMITS: ChunkLimits = ChunkLimits {
+    small_files_cap: 25,
+    large_files_cap: 5,
+    large_file_threshold_lines: 400,
+    max_lines: 5000,
+};
+const PR_CHECKS_OUTPUT_MAX_GRAPHEMES: usize = 4000;
+
+const PR_CHECKS_COMMAND_DISPLAY: &str = "`gh pr checks --watch`";
 
 // Track information about an in-flight exec command.
 struct RunningCommand {
@@ -233,6 +258,7 @@ pub(crate) struct ChatWidget {
     stream_controller: Option<StreamController>,
     running_commands: HashMap<String, RunningCommand>,
     task_complete_pending: bool,
+    pr_checks_in_progress: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupts: InterruptManager,
     // Accumulates the current reasoning block text to extract a header
@@ -252,6 +278,13 @@ pub(crate) struct ChatWidget {
     pending_notification: Option<Notification>,
     // Simple review mode flag; used to adjust layout and banners.
     is_review_mode: bool,
+    // Orchestrator for /review-branch multi-batch final-pass flow
+    review_orchestrator: Option<Orchestrator>,
+    // Subagent focus and registry
+    focused_subagent: Option<String>,
+    subagents: BTreeMap<String, String>, // id -> description
+    subagent_tasks: BTreeSet<String>,
+    subagent_status_messages: BTreeMap<String, String>,
     // List of ghost commits corresponding to each turn.
     ghost_snapshots: Vec<GhostCommit>,
     ghost_snapshots_disabled: bool,
@@ -364,6 +397,87 @@ impl ChatWidget {
         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
         self.full_reasoning_buffer.push_str("\n\n");
         self.reasoning_buffer.clear();
+    }
+
+    fn handle_task_started(&mut self, source_id: Option<&str>) {
+        if let Some(id) = source_id
+            && self.subagents.contains_key(id)
+        {
+            self.subagent_tasks.insert(id.to_string());
+            let default = self
+                .subagents
+                .get(id)
+                .map(|desc| format!("Subagent {id}: {desc}"))
+                .unwrap_or_else(|| format!("Subagent {id}: running"));
+            self.subagent_status_messages
+                .entry(id.to_string())
+                .or_insert(default);
+            self.update_subagent_status_panel();
+            return;
+        }
+        self.on_task_started();
+    }
+
+    fn handle_task_complete(
+        &mut self,
+        source_id: Option<&str>,
+        last_agent_message: Option<String>,
+    ) {
+        if let Some(id) = source_id
+            && self.subagents.contains_key(id)
+        {
+            self.subagent_tasks.remove(id);
+            self.subagent_status_messages.remove(id);
+            self.update_subagent_status_panel();
+            return;
+        }
+        self.on_task_complete(last_agent_message);
+    }
+
+    fn handle_turn_aborted(&mut self, source_id: Option<&str>, reason: TurnAbortReason) {
+        if let Some(id) = source_id
+            && self.subagents.contains_key(id)
+        {
+            self.subagent_tasks.remove(id);
+            self.subagent_status_messages
+                .insert(id.to_string(), format!("Subagent {id}: interrupted"));
+            self.update_subagent_status_panel();
+            return;
+        }
+        match reason {
+            TurnAbortReason::Interrupted | TurnAbortReason::ReviewEnded => {
+                self.on_interrupted_turn(reason)
+            }
+            TurnAbortReason::Replaced => {
+                self.on_error("Turn aborted: replaced by a new task".to_owned())
+            }
+        }
+    }
+
+    fn update_subagent_status_panel(&mut self) {
+        let lines: Vec<String> = self
+            .subagent_tasks
+            .iter()
+            .filter_map(|id| self.subagent_status_messages.get(id))
+            .cloned()
+            .collect();
+
+        if self.bottom_pane.is_task_running() {
+            if !lines.is_empty() {
+                self.bottom_pane.set_status_messages(lines);
+            } else {
+                self.bottom_pane.set_status_messages(Vec::new());
+            }
+            return;
+        }
+
+        if let Some(first) = lines.first() {
+            self.bottom_pane.update_status_header(first.clone());
+            self.bottom_pane.set_status_messages(lines);
+        } else {
+            self.bottom_pane.set_status_messages(Vec::new());
+            self.bottom_pane.clear_status_if_idle();
+        }
     }
 
     // Raw reasoning uses the same flow as summarized reasoning
@@ -590,6 +704,33 @@ impl ChatWidget {
 
     fn on_background_event(&mut self, message: String) {
         debug!("BackgroundEvent: {message}");
+        // Surface subagent lifecycle events and track active set.
+        if let Some(stripped) = message.strip_prefix("Subagent ") {
+            if let Some((id, rest)) = stripped.split_once(' ') {
+                if rest.starts_with("opened:") {
+                    let desc = rest.trim_start_matches("opened:").trim().to_string();
+                    self.subagents.insert(id.to_string(), desc.clone());
+                    self.subagent_status_messages
+                        .insert(id.to_string(), format!("Subagent {id}: {desc}"));
+                    self.update_subagent_status_panel();
+                } else if rest.starts_with("ended") {
+                    self.subagents.remove(id);
+                    if self.focused_subagent.as_deref() == Some(id) {
+                        self.focused_subagent = None;
+                    }
+                    self.subagent_tasks.remove(id);
+                    self.subagent_status_messages.remove(id);
+                    self.update_subagent_status_panel();
+                } else if rest.starts_with("progress:") {
+                    let progress = rest.trim_start_matches("progress:").trim().to_string();
+                    self.subagent_status_messages
+                        .insert(id.to_string(), format!("Subagent {id}: {progress}"));
+                    self.update_subagent_status_panel();
+                }
+            }
+            self.add_to_history(history_cell::new_subagent_event(message));
+            self.request_redraw();
+        }
     }
 
     fn on_stream_error(&mut self, message: String) {
@@ -892,6 +1033,7 @@ impl ChatWidget {
             stream_controller: None,
             running_commands: HashMap::new(),
             task_complete_pending: false,
+            pr_checks_in_progress: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
@@ -901,6 +1043,11 @@ impl ChatWidget {
             suppress_session_configured_redraw: false,
             pending_notification: None,
             is_review_mode: false,
+            review_orchestrator: None,
+            focused_subagent: None,
+            subagents: BTreeMap::new(),
+            subagent_tasks: BTreeSet::new(),
+            subagent_status_messages: BTreeMap::new(),
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
         }
@@ -953,6 +1100,7 @@ impl ChatWidget {
             stream_controller: None,
             running_commands: HashMap::new(),
             task_complete_pending: false,
+            pr_checks_in_progress: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
@@ -962,6 +1110,11 @@ impl ChatWidget {
             suppress_session_configured_redraw: true,
             pending_notification: None,
             is_review_mode: false,
+            review_orchestrator: None,
+            focused_subagent: None,
+            subagents: BTreeMap::new(),
+            subagent_tasks: BTreeSet::new(),
+            subagent_status_messages: BTreeMap::new(),
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
         }
@@ -984,6 +1137,15 @@ impl ChatWidget {
                 ..
             } => {
                 self.on_ctrl_c();
+                return;
+            }
+            KeyEvent {
+                code: KeyCode::Char('o'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                self.cycle_subagent_focus();
                 return;
             }
             KeyEvent {
@@ -1020,15 +1182,19 @@ impl ChatWidget {
             _ => {
                 match self.bottom_pane.handle_key_event(key_event) {
                     InputResult::Submitted(text) => {
-                        // If a task is running, queue the user input to be sent after the turn completes.
+                        // When a subagent is focused, allow sending messages to it even while
+                        // the parent turn is running. This keeps subagent chats responsive and
+                        // avoids blocking the main chat while subagent opens/replies proceed.
                         let user_message = UserMessage {
                             text,
                             image_paths: self.bottom_pane.take_recent_submission_images(),
                         };
-                        if self.bottom_pane.is_task_running() {
+                        if self.bottom_pane.is_task_running() && self.focused_subagent.is_none() {
+                            // Parent focused: queue until the current turn completes.
                             self.queued_user_messages.push_back(user_message);
                             self.refresh_queued_user_messages();
                         } else {
+                            // Either no task is running, or a subagent is focused: send now.
                             self.submit_user_message(user_message);
                         }
                     }
@@ -1039,6 +1205,24 @@ impl ChatWidget {
                 }
             }
         }
+    }
+
+    fn cycle_subagent_focus(&mut self) {
+        // Ordered list: parent (None) + active subagent ids sorted
+        let mut ids: Vec<Option<String>> = vec![None];
+        ids.extend(self.subagents.keys().cloned().map(Some));
+        let cur_idx = ids
+            .iter()
+            .position(|v| v.as_ref() == self.focused_subagent.as_ref())
+            .unwrap_or(0);
+        let next_idx = (cur_idx + 1) % ids.len().max(1);
+        self.focused_subagent = ids[next_idx].clone();
+        let banner = match self.focused_subagent.as_deref() {
+            Some(id) => format!("Focus: subagent {id}"),
+            None => "Focus: parent".to_string(),
+        };
+        self.add_to_history(history_cell::new_subagent_event(banner));
+        self.request_redraw();
     }
 
     pub(crate) fn attach_image(
@@ -1080,6 +1264,9 @@ impl ChatWidget {
             }
             SlashCommand::Review => {
                 self.open_review_popup();
+            }
+            SlashCommand::PrChecks => {
+                self.start_pr_checks();
             }
             SlashCommand::Model => {
                 self.open_model_popup();
@@ -1220,15 +1407,47 @@ impl ChatWidget {
             items.push(InputItem::Text { text: text.clone() });
         }
 
-        for path in image_paths {
-            items.push(InputItem::LocalImage { path });
+        for path in &image_paths {
+            items.push(InputItem::LocalImage {
+                path: path.to_path_buf(),
+            });
         }
 
-        self.codex_op_tx
-            .send(Op::UserInput { items })
-            .unwrap_or_else(|e| {
-                tracing::error!("failed to send message: {e}");
-            });
+        if items.is_empty() {
+            return;
+        }
+
+        if let Some(sub_id) = self.focused_subagent.clone() {
+            self.codex_op_tx
+                .send(Op::SubagentDirectMessage {
+                    subagent_id: sub_id.clone(),
+                    message: text.clone(),
+                    images: if image_paths.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            image_paths
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect(),
+                        )
+                    },
+                    mode: Some("blocking".to_string()),
+                    timeout_ms: None,
+                })
+                .unwrap_or_else(|e| tracing::error!("failed to send subagent message: {e}"));
+            if !text.is_empty() {
+                self.add_to_history(history_cell::new_subagent_event(format!(
+                    "To subagent {sub_id}: {text}"
+                )));
+            }
+        } else {
+            self.codex_op_tx
+                .send(Op::UserInput { items })
+                .unwrap_or_else(|e| {
+                    tracing::error!("failed to send message: {e}");
+                });
+        }
 
         // Persist the text to cross-session message history.
         if !text.is_empty() {
@@ -1240,7 +1459,7 @@ impl ChatWidget {
         }
 
         // Only show the text portion in conversation history.
-        if !text.is_empty() {
+        if !text.is_empty() && self.focused_subagent.is_none() {
             self.add_to_history(history_cell::new_user_prompt(text));
         }
     }
@@ -1347,26 +1566,18 @@ impl ChatWidget {
                 self.on_agent_reasoning_final()
             }
             EventMsg::AgentReasoningSectionBreak(_) => self.on_reasoning_section_break(),
-            EventMsg::TaskStarted(_) => self.on_task_started(),
+            EventMsg::TaskStarted(_) => self.handle_task_started(id.as_deref()),
             EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
-                self.on_task_complete(last_agent_message)
+                self.handle_task_complete(id.as_deref(), last_agent_message)
             }
             EventMsg::TokenCount(ev) => {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
             EventMsg::Error(ErrorEvent { message }) => self.on_error(message),
-            EventMsg::TurnAborted(ev) => match ev.reason {
-                TurnAbortReason::Interrupted => {
-                    self.on_interrupted_turn(ev.reason);
-                }
-                TurnAbortReason::Replaced => {
-                    self.on_error("Turn aborted: replaced by a new task".to_owned())
-                }
-                TurnAbortReason::ReviewEnded => {
-                    self.on_interrupted_turn(ev.reason);
-                }
-            },
+            EventMsg::TurnAborted(ev) => {
+                self.handle_turn_aborted(id.as_deref(), ev.reason);
+            }
             EventMsg::PlanUpdate(update) => self.on_plan_update(update),
             EventMsg::ExecApprovalRequest(ev) => {
                 // For replayed events, synthesize an empty id (these should not occur).
@@ -1418,6 +1629,33 @@ impl ChatWidget {
     }
 
     fn on_exited_review_mode(&mut self, review: ExitedReviewModeEvent) {
+        let mut handled_by_orchestrator = false;
+        if let Some(orc) = self.review_orchestrator.as_mut()
+            && let Some(ref output) = review.review_output
+        {
+            match orc.stage() {
+                OrchestratorStage::Batching => {
+                    orc.on_batch_result(output);
+                    handled_by_orchestrator = true;
+                }
+                OrchestratorStage::Consolidation => {
+                    orc.on_consolidation_result(output);
+                    self.review_orchestrator = None;
+                }
+                OrchestratorStage::Done => {
+                    self.review_orchestrator = None;
+                }
+            }
+        } else if review.review_output.is_none() {
+            self.review_orchestrator = None;
+        }
+
+        if handled_by_orchestrator {
+            self.is_review_mode = false;
+            self.request_redraw();
+            return;
+        }
+
         // Leave review mode; if output is present, flush pending stream + show results.
         if let Some(output) = review.review_output {
             self.flush_answer_stream_with_separator();
@@ -1427,7 +1665,7 @@ impl ChatWidget {
             if output.findings.is_empty() {
                 let explanation = output.overall_explanation.trim().to_string();
                 if explanation.is_empty() {
-                    tracing::error!("Reviewer failed to output a response.");
+                    error!("Reviewer failed to output a response.");
                     self.add_to_history(history_cell::new_error_event(
                         "Reviewer failed to output a response.".to_owned(),
                     ));
@@ -1548,6 +1786,134 @@ impl ChatWidget {
             &self.conversation_id,
             self.rate_limit_snapshot.as_ref(),
         ));
+    }
+
+    pub(crate) fn start_pr_checks(&mut self) {
+        if self.pr_checks_in_progress {
+            self.add_info_message(
+                "PR checks are already running.".to_string(),
+                Some(
+                    "Wait for the current run to finish before using /pr-checks again.".to_string(),
+                ),
+            );
+            return;
+        }
+
+        self.pr_checks_in_progress = true;
+        self.add_info_message(format!("Running {PR_CHECKS_COMMAND_DISPLAY}..."), None);
+
+        let tx = self.app_event_tx.clone();
+        let cwd = self.config.cwd.clone();
+        tokio::spawn(async move {
+            let outcome = run_pr_checks(cwd).await;
+            tx.send(AppEvent::PrChecksFinished(outcome));
+        });
+    }
+
+    pub(crate) fn on_pr_checks_finished(&mut self, outcome: PrChecksOutcome) {
+        self.pr_checks_in_progress = false;
+
+        let PrChecksOutcome {
+            success,
+            exit_status,
+            stdout,
+            stderr,
+            spawn_error,
+        } = outcome;
+
+        if spawn_error.is_some() {
+            if let Some(error) = spawn_error.as_deref() {
+                self.add_error_message(format!(
+                    "Failed to run {PR_CHECKS_COMMAND_DISPLAY}: {error}"
+                ));
+            }
+            self.begin_fixing_pr_checks(spawn_error, exit_status, stdout, stderr);
+            return;
+        }
+
+        if success {
+            let mut message = format!("{PR_CHECKS_COMMAND_DISPLAY} completed successfully.");
+            if let Some(snippet) = Self::format_pr_checks_output_snippet(&stdout, &stderr) {
+                message.push_str("\n\n");
+                message.push_str(&snippet);
+            }
+            self.add_info_message(message, None);
+        } else {
+            let exit_description = exit_status
+                .map(|code| format!("exit code {code}"))
+                .unwrap_or_else(|| "no exit status (terminated by signal)".to_string());
+
+            self.add_error_message(format!(
+                "{PR_CHECKS_COMMAND_DISPLAY} failed with {exit_description}. Starting automatic fix."
+            ));
+            self.begin_fixing_pr_checks(spawn_error, exit_status, stdout, stderr);
+        }
+    }
+
+    fn begin_fixing_pr_checks(
+        &mut self,
+        spawn_error: Option<String>,
+        exit_status: Option<i32>,
+        stdout: String,
+        stderr: String,
+    ) {
+        if let Some(error) = spawn_error {
+            let truncated = truncate_text(&error, PR_CHECKS_OUTPUT_MAX_GRAPHEMES);
+            let mut message = format!(
+                "{PR_CHECKS_COMMAND_DISPLAY} could not be executed. Please resolve the underlying issue and ensure the PR checks pass."
+            );
+            message.push_str("\n\nSpawn error:\n```\n");
+            message.push_str(&truncated);
+            message.push_str("\n```");
+            message.push_str(
+                "\n\nAfter addressing the problems, run the `run_pr_checks` tool to verify the checks succeed.",
+            );
+            self.submit_text_message(message);
+            return;
+        }
+
+        let exit_description = exit_status
+            .map(|code| format!("exit code {code}"))
+            .unwrap_or_else(|| "no exit status (terminated by signal)".to_string());
+
+        let mut message = format!(
+            "{PR_CHECKS_COMMAND_DISPLAY} failed with {exit_description}. Please fix the issues reported by the PR checks."
+        );
+
+        if let Some(snippet) = Self::format_pr_checks_output_snippet(&stdout, &stderr) {
+            message.push_str("\n\n");
+            message.push_str(&snippet);
+        }
+
+        message.push_str(
+            "\n\nAfter addressing the problems, run the `run_pr_checks` tool to verify the checks succeed.",
+        );
+
+        self.submit_text_message(message);
+    }
+
+    fn format_pr_checks_output_snippet(stdout: &str, stderr: &str) -> Option<String> {
+        let mut blocks = Vec::new();
+        if let Some(block) = Self::format_pr_checks_output_block("stdout", stdout) {
+            blocks.push(block);
+        }
+        if let Some(block) = Self::format_pr_checks_output_block("stderr", stderr) {
+            blocks.push(block);
+        }
+        if blocks.is_empty() {
+            None
+        } else {
+            Some(blocks.join("\n\n"))
+        }
+    }
+
+    fn format_pr_checks_output_block(label: &str, content: &str) -> Option<String> {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let truncated = truncate_text(trimmed, PR_CHECKS_OUTPUT_MAX_GRAPHEMES);
+        Some(format!("{label}:\n```\n{truncated}\n```"))
     }
 
     /// Open a popup to choose the model preset (model + reasoning effort).
@@ -1798,15 +2164,31 @@ impl ChatWidget {
             search_value: None,
         });
 
+        let cwd_for_standard = self.config.cwd.clone();
         items.push(SelectionItem {
-            name: "Review against a base branch".to_string(),
-            description: None,
+            name: "Quick review against a base branch".to_string(),
+            description: Some("Single-pass review versus a selected base".to_string()),
             is_current: false,
-            actions: vec![Box::new({
-                let cwd = self.config.cwd.clone();
-                move |tx| {
-                    tx.send(AppEvent::OpenReviewBranchPicker(cwd.clone()));
-                }
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::OpenReviewBranchPicker {
+                    cwd: cwd_for_standard.clone(),
+                    mode: ReviewBranchMode::Standard,
+                });
+            })],
+            dismiss_on_select: false,
+            search_value: None,
+        });
+
+        let cwd_for_deep = self.config.cwd.clone();
+        items.push(SelectionItem {
+            name: "Deep review against a base branch".to_string(),
+            description: Some("Batch large diffs for a thorough pass".to_string()),
+            is_current: false,
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::OpenReviewBranchPicker {
+                    cwd: cwd_for_deep.clone(),
+                    mode: ReviewBranchMode::Deep,
+                });
             })],
             dismiss_on_select: false,
             search_value: None,
@@ -1831,7 +2213,7 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) async fn show_review_branch_picker(&mut self, cwd: &Path) {
+    pub(crate) async fn show_review_branch_picker(&mut self, cwd: &Path, mode: ReviewBranchMode) {
         let branches = local_git_branches(cwd).await;
         let current_branch = current_branch_name(cwd)
             .await
@@ -1840,33 +2222,114 @@ impl ChatWidget {
 
         for option in branches {
             let branch = option.clone();
+            let name = format!("{current_branch} -> {branch}");
+            let event_base = branch.clone();
             items.push(SelectionItem {
-                name: format!("{current_branch} -> {branch}"),
+                name,
                 description: None,
                 is_current: false,
                 actions: vec![Box::new(move |tx3: &AppEventSender| {
-                    tx3.send(AppEvent::CodexOp(Op::Review {
-                        review_request: ReviewRequest {
-                            prompt: format!(
-                                "Review the code changes against the base branch '{branch}'. Start by finding the merge diff between the current branch and {branch}'s upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \"{branch}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes we would merge into the {branch} branch. Provide prioritized, actionable findings."
-                            ),
-                            user_facing_hint: format!("changes against '{branch}'"),
-                        },
-                    }));
+                    tx3.send(AppEvent::StartBranchReview {
+                        base: event_base.clone(),
+                        mode,
+                    });
                 })],
                 dismiss_on_select: true,
                 search_value: Some(option),
             });
         }
 
+        let title = match mode {
+            ReviewBranchMode::Standard => "Select a base branch".to_string(),
+            ReviewBranchMode::Deep => "Select a base branch for deep review".to_string(),
+        };
+
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: "Select a base branch".to_string(),
+            title,
             footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
             items,
             is_searchable: true,
             search_placeholder: Some("Type to search branches".to_string()),
             ..Default::default()
         });
+    }
+
+    pub(crate) async fn start_standard_branch_review(&mut self, base: String, reason: String) {
+        self.review_orchestrator = None;
+        let size_hint_line = match branch_shortstat(&base).await {
+            Ok(Some(stats)) => format!("Diff stats: {stats}"),
+            Ok(None) => String::new(),
+            Err(err) => {
+                warn!(%err, "failed to compute diff stats for {base}");
+                String::new()
+            }
+        };
+
+        let prompt = REVIEW_BRANCH_PROMPT_TMPL
+            .replace("{base}", &base)
+            .replace("{size_hint_line}", &size_hint_line);
+        let hint = format!("changes against '{base}'");
+
+        self.add_to_history(history_cell::new_review_status_line(format!(
+            "Reviewing changes vs {base} ({reason})",
+        )));
+
+        self.app_event_tx.send(AppEvent::CodexOp(Op::Review {
+            review_request: ReviewRequest {
+                prompt,
+                user_facing_hint: hint,
+            },
+        }));
+    }
+
+    pub(crate) async fn start_deep_branch_review(
+        &mut self,
+        base: String,
+        reason: String,
+    ) -> AnyResult<()> {
+        self.review_orchestrator = None;
+        let diff_stats = match branch_shortstat(&base).await {
+            Ok(Some(stats)) => Some(stats),
+            Ok(None) => None,
+            Err(err) => {
+                warn!(%err, "failed to compute diff stats for {base}");
+                None
+            }
+        };
+
+        if let Some(ref stats) = diff_stats {
+            self.add_to_history(history_cell::new_review_status_line(format!(
+                "Diff stats vs {base}: {stats}",
+            )));
+        }
+
+        let orchestrator = Orchestrator::new(
+            self.app_event_tx.clone(),
+            base.clone(),
+            reason.clone(),
+            REVIEW_BRANCH_LIMITS,
+            REVIEW_BRANCH_BATCH_PROMPT_TMPL,
+            REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL,
+        )
+        .await?;
+
+        if !orchestrator.has_batches() {
+            // Branch diff small enough for a single pass; fall back to standard review.
+            self.start_standard_branch_review(base, reason).await;
+            return Ok(());
+        }
+
+        let total_batches = orchestrator.batches.len();
+        self.add_to_history(history_cell::new_review_status_line(format!(
+            "Deep review vs {base} ({reason}) — planning {total_batches} batch(es)",
+        )));
+
+        self.review_orchestrator = Some(orchestrator);
+        if let Some(orc) = self.review_orchestrator.as_mut() {
+            orc.start();
+        }
+
+        Ok(())
     }
 
     pub(crate) async fn show_review_commit_picker(&mut self, cwd: &Path) {
@@ -2137,3 +2600,6 @@ pub(crate) fn show_review_commit_picker_with_entries(
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+pub(crate) mod tests_subagent;

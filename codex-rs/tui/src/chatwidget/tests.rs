@@ -1,8 +1,17 @@
 use super::*;
 use crate::app_event::AppEvent;
+use crate::app_event::ReviewBranchMode;
 use crate::app_event_sender::AppEventSender;
+use crate::pr_checks::PrChecksOutcome;
+use crate::review_branch::chunker::ChunkLimits;
+use crate::review_branch::orchestrator::Orchestrator;
+use crate::review_branch::orchestrator::OrchestratorStage;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
+use codex_core::CodexConversation;
+use codex_core::ConversationManager;
+use codex_core::ModelProviderInfo;
+use codex_core::built_in_model_providers;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
@@ -14,6 +23,7 @@ use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
 use codex_core::protocol::AgentReasoningEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
+use codex_core::protocol::BackgroundEventEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecApprovalRequestEvent;
@@ -21,6 +31,7 @@ use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::FileChange;
+use codex_core::protocol::InputItem;
 use codex_core::protocol::InputMessageKind;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
@@ -34,17 +45,36 @@ use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TaskStartedEvent;
 use codex_protocol::mcp_protocol::ConversationId;
+use core_test_support::load_default_config_for_test;
+use core_test_support::load_sse_fixture_with_id_from_str;
+use core_test_support::wait_for_event;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use insta::assert_snapshot;
+use once_cell::sync::Lazy;
 use pretty_assertions::assert_eq;
+use std::env;
+use std::fs;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
+use std::process::Stdio;
+use std::sync::Arc;
 use tempfile::NamedTempFile;
+use tempfile::TempDir;
+use tokio::process::Command as TokioCommand;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc::unbounded_channel;
+use uuid::Uuid;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 fn test_config() -> Config {
     // Use base defaults to avoid depending on host state.
@@ -80,6 +110,30 @@ fn upgrade_event_payload_for_tests(mut payload: serde_json::Value) -> serde_json
     }
     payload
 }
+
+static CWD_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
+
+const TEST_REVIEW_BRANCH_PROMPT_TMPL: &str = include_str!("../prompt_for_review_branch_command.md");
+const TEST_REVIEW_BRANCH_BATCH_PROMPT_TMPL: &str =
+    include_str!("../prompt_for_review_branch_batch_command.md");
+const TEST_REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL: &str =
+    include_str!("../prompt_for_review_branch_consolidation.md");
+
+const REVIEW_SSE_TEMPLATE: &str = r#"[
+    {"type":"response.output_item.done","item":{
+        "type":"message",
+        "role":"assistant",
+        "content":[{"type":"output_text","text":"{\"findings\":[{\"title\":\"Prefer Stylize helpers\",\"body\":\"Use .dim()/.bold() chaining instead of manual Style where possible.\",\"confidence_score\":0.9,\"priority\":1,\"code_location\":{\"absolute_file_path\":\"tests/file.rs\",\"line_range\":{\"start\":10,\"end\":20}}}],\"overall_correctness\":\"good\",\"overall_explanation\":\"All good with some improvements suggested.\",\"overall_confidence_score\":0.8}"}] 
+    }},
+    {"type":"response.completed","response":{"id":"__ID__"}}
+]"#;
+
+const REVIEW_BRANCH_LIMITS_FOR_TESTS: ChunkLimits = ChunkLimits {
+    small_files_cap: 25,
+    large_files_cap: 5,
+    large_file_threshold_lines: 400,
+    max_lines: 5000,
+};
 
 #[test]
 fn final_answer_without_newline_is_flushed_immediately() {
@@ -264,6 +318,148 @@ fn exited_review_mode_emits_results_and_finishes() {
     assert!(!chat.is_review_mode);
 }
 
+/// Background subagent lifecycle events render as compact transcript lines.
+#[test]
+fn subagent_background_event_renders() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
+
+    chat.handle_codex_event(Event {
+        id: "s1".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-1 opened: index repo".to_string(),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    let blob = lines_to_single_string(cells.last().expect("subagent line"));
+    assert!(blob.contains("Subagent subagent-1 opened"), "{blob:?}");
+}
+
+#[test]
+fn subagent_focus_cycle_and_direct_message_op() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    // Announce two subagents
+    chat.handle_codex_event(Event {
+        id: "s0".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-1 opened: index repo".to_string(),
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "s0".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-2 opened: run tests".to_string(),
+        }),
+    });
+    drain_insert_history(&mut rx); // consume lifecycle lines
+
+    // Ctrl+O -> focus first subagent
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let focus_line = drain_insert_history(&mut rx).pop().unwrap();
+    let blob = lines_to_single_string(&focus_line);
+    assert!(blob.contains("Focus: subagent subagent-1"), "{blob:?}");
+
+    // Submit a message; expect SubagentDirectMessage op
+    chat.set_composer_text("hello child".into());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    // Consume the transcript injection
+    let submit_cell = drain_insert_history(&mut rx).pop().unwrap();
+    let submit_blob = lines_to_single_string(&submit_cell);
+    assert!(submit_blob.contains("To subagent subagent-1: hello child"));
+    // Verify op sent to backend (skip AddToHistory if present)
+    let mut op = op_rx.try_recv().expect("expected an op");
+    while matches!(op, Op::AddToHistory { .. }) {
+        op = op_rx
+            .try_recv()
+            .expect("expected subagent direct message op");
+    }
+    match op {
+        Op::SubagentDirectMessage {
+            subagent_id,
+            message,
+            ..
+        } => {
+            assert_eq!(subagent_id, "subagent-1");
+            assert_eq!(message, "hello child");
+        }
+        other => panic!("unexpected op: {other:?}"),
+    }
+
+    // Ctrl+O -> next subagent; submit again
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    drain_insert_history(&mut rx); // focus banner
+    chat.set_composer_text("run unit tests".into());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let mut op2 = op_rx.try_recv().expect("expected second subagent op");
+    while matches!(op2, Op::AddToHistory { .. }) {
+        op2 = op_rx.try_recv().expect("expected second subagent op");
+    }
+    match op2 {
+        Op::SubagentDirectMessage {
+            subagent_id,
+            message,
+            ..
+        } => {
+            assert_eq!(subagent_id, "subagent-2");
+            assert_eq!(message, "run unit tests");
+        }
+        other => panic!("unexpected op: {other:?}"),
+    }
+
+    // Ctrl+O -> back to parent; submitting now should send UserInput, not SubagentDirectMessage
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    drain_insert_history(&mut rx); // focus banner
+    chat.set_composer_text("parent message".into());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let mut op3 = op_rx.try_recv().expect("expected parent user input op");
+    while matches!(op3, Op::AddToHistory { .. }) {
+        op3 = op_rx.try_recv().expect("expected parent user input op");
+    }
+    match op3 {
+        Op::UserInput { items } => {
+            // Should contain exactly one Text item with our message
+            let only = items.first().expect("at least one item");
+            match only {
+                codex_core::protocol::InputItem::Text { text } => {
+                    assert_eq!(text, "parent message");
+                }
+                other => panic!("unexpected input item: {other:?}"),
+            }
+        }
+        other => panic!("unexpected op variant for parent: {other:?}"),
+    }
+}
+
+#[test]
+fn subagent_focus_clears_on_end() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    chat.handle_codex_event(Event {
+        id: "s0".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-9 opened: work".to_string(),
+        }),
+    });
+    drain_insert_history(&mut rx);
+    // Focus it
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    drain_insert_history(&mut rx);
+    // End it; focus should reset to parent implicitly
+    chat.handle_codex_event(Event {
+        id: "s0".into(),
+        msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+            message: "Subagent subagent-9 ended".to_string(),
+        }),
+    });
+    drain_insert_history(&mut rx);
+    // Press Ctrl+O cycles: with no active subagents, expect focus remains parent and banner says parent
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let last = drain_insert_history(&mut rx).pop().unwrap();
+    let blob = lines_to_single_string(&last);
+    assert!(blob.contains("Focus: parent"), "{blob:?}");
+}
+
 #[cfg_attr(
     target_os = "macos",
     ignore = "system configuration APIs are blocked under macOS seatbelt"
@@ -292,7 +488,7 @@ async fn helpers_are_available_and_do_not_panic() {
 }
 
 // --- Helpers for tests that need direct construction and event draining ---
-fn make_chatwidget_manual() -> (
+pub(crate) fn make_chatwidget_manual() -> (
     ChatWidget,
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
@@ -325,6 +521,7 @@ fn make_chatwidget_manual() -> (
         stream_controller: None,
         running_commands: HashMap::new(),
         task_complete_pending: false,
+        pr_checks_in_progress: false,
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
         full_reasoning_buffer: String::new(),
@@ -335,8 +532,13 @@ fn make_chatwidget_manual() -> (
         suppress_session_configured_redraw: false,
         pending_notification: None,
         is_review_mode: false,
+        review_orchestrator: None,
+        focused_subagent: None,
+        subagents: std::collections::BTreeMap::new(),
+        subagent_tasks: std::collections::BTreeSet::new(),
+        subagent_status_messages: std::collections::BTreeMap::new(),
         ghost_snapshots: Vec::new(),
-        ghost_snapshots_disabled: false,
+        ghost_snapshots_disabled: true,
     };
     (widget, rx, op_rx)
 }
@@ -352,7 +554,7 @@ pub(crate) fn make_chatwidget_manual_with_sender() -> (
     (widget, app_event_tx, rx, op_rx)
 }
 
-fn drain_insert_history(
+pub(crate) fn drain_insert_history(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
 ) -> Vec<Vec<ratatui::text::Line<'static>>> {
     let mut out = Vec::new();
@@ -705,9 +907,9 @@ fn review_popup_custom_prompt_action_sends_event() {
     chat.open_review_popup();
 
     // Move selection down to the fourth item: "Custom review instructions"
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    for _ in 0..4 {
+        chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
     // Activate
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -899,7 +1101,8 @@ async fn review_branch_picker_escape_navigates_back_then_dismisses() {
 
     // Open the branch picker submenu (child view). Using a temp cwd with no git repo is fine.
     let cwd = std::env::temp_dir();
-    chat.show_review_branch_picker(&cwd).await;
+    chat.show_review_branch_picker(&cwd, ReviewBranchMode::Standard)
+        .await;
 
     // Verify child view header.
     let header = render_bottom_first_row(&chat, 60);
@@ -1392,6 +1595,132 @@ fn ui_snapshots_small_heights_task_running() {
             .draw(|f| f.render_widget_ref(&chat, f.area()))
             .expect("draw chat running");
         assert_snapshot!(name, terminal.backend());
+    }
+}
+
+#[test]
+fn pr_checks_success_records_info_history() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+    chat.pr_checks_in_progress = true;
+
+    chat.on_pr_checks_finished(PrChecksOutcome {
+        success: true,
+        exit_status: Some(0),
+        stdout: "all checks passing".into(),
+        stderr: String::new(),
+        spawn_error: None,
+    });
+
+    assert!(!chat.pr_checks_in_progress, "flag should reset");
+    assert!(
+        op_rx.try_recv().is_err(),
+        "success should not send user input"
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected single info entry");
+    let blob = lines_to_single_string(cells.last().unwrap());
+    assert!(
+        blob.contains("`gh pr checks --watch` completed successfully."),
+        "info entry should mention success"
+    );
+    assert!(
+        blob.contains("stdout:\n```\nall checks passing"),
+        "info entry should include stdout snippet"
+    );
+}
+
+#[test]
+fn pr_checks_failure_sends_fix_prompt() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    chat.on_pr_checks_finished(PrChecksOutcome {
+        success: false,
+        exit_status: Some(1),
+        stdout: "lint failure".into(),
+        stderr: "test panic".into(),
+        spawn_error: None,
+    });
+
+    assert!(!chat.pr_checks_in_progress, "flag should reset");
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.iter().any(|lines| {
+            let blob = lines_to_single_string(lines);
+            blob.contains("failed with exit code 1")
+        }),
+        "history should contain failure error message"
+    );
+
+    let op = op_rx.try_recv().expect("expected user prompt");
+    match op {
+        Op::UserInput { items } => {
+            assert_eq!(items.len(), 1);
+            match &items[0] {
+                InputItem::Text { text } => {
+                    assert!(
+                        text.contains("Please fix the issues reported by the PR checks."),
+                        "submitted prompt should instruct fixing"
+                    );
+                    assert!(
+                        text.contains("stdout:\n```\nlint failure"),
+                        "prompt should include stdout snippet"
+                    );
+                    assert!(
+                        text.contains("stderr:\n```\ntest panic"),
+                        "prompt should include stderr snippet"
+                    );
+                    assert!(
+                        text.contains("run the `run_pr_checks` tool"),
+                        "prompt should point to run_pr_checks tool"
+                    );
+                }
+                other => panic!("unexpected input item: {other:?}"),
+            }
+        }
+        other => panic!("unexpected op: {other:?}"),
+    }
+}
+
+#[test]
+fn pr_checks_spawn_error_reports_issue() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    chat.on_pr_checks_finished(PrChecksOutcome::failure_with_error(
+        "gh executable not found".into(),
+    ));
+
+    assert!(!chat.pr_checks_in_progress, "flag should reset");
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.iter().any(|lines| {
+            let blob = lines_to_single_string(lines);
+            blob.contains("could not be executed")
+        }),
+        "history should mention spawn error"
+    );
+
+    let op = op_rx.try_recv().expect("expected user prompt");
+    match op {
+        Op::UserInput { items } => {
+            assert_eq!(items.len(), 1);
+            match &items[0] {
+                InputItem::Text { text } => {
+                    assert!(
+                        text.contains("gh executable not found"),
+                        "prompt should include spawn error"
+                    );
+                    assert!(
+                        text.contains("run the `run_pr_checks` tool"),
+                        "prompt should point to run_pr_checks tool"
+                    );
+                }
+                other => panic!("unexpected input item: {other:?}"),
+            }
+        }
+        other => panic!("unexpected op: {other:?}"),
     }
 }
 
@@ -2164,6 +2493,275 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
 
     let visual = vt_lines.join("\n");
     assert_snapshot!(visual);
+}
+
+async fn with_repo_cwd<F, Fut, T>(repo: &Path, f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let _guard = CWD_LOCK.lock().await;
+    let original = env::current_dir().expect("read cwd");
+    env::set_current_dir(repo).expect("set cwd");
+    let result = f().await;
+    env::set_current_dir(original).expect("restore cwd");
+    result
+}
+
+fn run_git(repo: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()
+        .expect("git command");
+    assert!(status.success(), "git {:?} failed", args);
+}
+
+fn write_file(repo: &Path, rel: &str, contents: &str) {
+    let path = repo.join(rel);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create parent dirs");
+    }
+    fs::write(&path, contents).expect("write file");
+}
+
+fn setup_standard_review_repo() -> TempDir {
+    let repo = TempDir::new().expect("tempdir");
+    run_git(repo.path(), &["init"]);
+    run_git(repo.path(), &["branch", "-M", "main"]);
+    run_git(repo.path(), &["config", "user.name", "Test User"]);
+    run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+    write_file(repo.path(), "src/lib.rs", "fn main() {}\n");
+    run_git(repo.path(), &["add", "."]);
+    run_git(repo.path(), &["commit", "-m", "initial commit"]);
+    run_git(repo.path(), &["checkout", "-b", "feature"]);
+    write_file(
+        repo.path(),
+        "src/lib.rs",
+        "fn main() { println!(\"feature\"); }\n",
+    );
+    run_git(repo.path(), &["add", "."]);
+    run_git(repo.path(), &["commit", "-m", "feature work"]);
+    repo
+}
+
+fn setup_deep_review_repo() -> TempDir {
+    let repo = TempDir::new().expect("tempdir");
+    run_git(repo.path(), &["init"]);
+    run_git(repo.path(), &["branch", "-M", "main"]);
+    run_git(repo.path(), &["config", "user.name", "Test User"]);
+    run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+    write_file(repo.path(), "README.md", "Base commit\n");
+    run_git(repo.path(), &["add", "."]);
+    run_git(repo.path(), &["commit", "-m", "base"]);
+    run_git(repo.path(), &["checkout", "-b", "feature"]);
+    for idx in 0..30 {
+        write_file(
+            repo.path(),
+            &format!("src/file_{idx}.rs"),
+            &format!("// file {idx}\npub fn value() -> usize {{ {idx} }}\n"),
+        );
+    }
+    run_git(repo.path(), &["add", "."]);
+    run_git(repo.path(), &["commit", "-m", "feature batch"]);
+    repo
+}
+
+async fn start_review_server(expected_requests: usize) -> MockServer {
+    let server = MockServer::start().await;
+    let body = load_sse_fixture_with_id_from_str(REVIEW_SSE_TEMPLATE, &Uuid::new_v4().to_string());
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(body, "text/event-stream"),
+        )
+        .expect(expected_requests as u64)
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn new_conversation_for_server(
+    server: &MockServer,
+    codex_home: &TempDir,
+    cwd: &Path,
+) -> Arc<CodexConversation> {
+    let mut config = load_default_config_for_test(codex_home);
+    let provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+    config.model_provider = provider;
+    config.cwd = cwd.to_path_buf();
+    let manager = ConversationManager::with_auth(CodexAuth::from_api_key("test"));
+    manager
+        .new_conversation(config)
+        .await
+        .expect("create conversation")
+        .conversation
+}
+
+async fn execute_review_request(
+    conversation: &Arc<CodexConversation>,
+    review_request: ReviewRequest,
+) -> ReviewOutputEvent {
+    conversation
+        .submit(Op::Review {
+            review_request: review_request.clone(),
+        })
+        .await
+        .expect("submit review");
+
+    let _entered = wait_for_event(conversation, |ev| {
+        matches!(ev, EventMsg::EnteredReviewMode(_))
+    })
+    .await;
+    let exited = wait_for_event(conversation, |ev| {
+        matches!(ev, EventMsg::ExitedReviewMode(_))
+    })
+    .await;
+    let output = match exited {
+        EventMsg::ExitedReviewMode(ev) => ev.review_output.expect("expected review output"),
+        other => panic!("unexpected event: {other:?}"),
+    };
+    let _complete =
+        wait_for_event(conversation, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+    output
+}
+
+async fn next_review_request(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) -> ReviewRequest {
+    loop {
+        match rx.recv().await.expect("app event") {
+            AppEvent::CodexOp(Op::Review { review_request }) => return review_request,
+            _ => continue,
+        }
+    }
+}
+
+async fn assert_no_pr_checks(server: &MockServer) {
+    let requests = server.received_requests().await.expect("received requests");
+    assert!(!requests.is_empty(), "expected at least one request");
+    for req in requests {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).expect("json body");
+        if let Some(tools) = body.get("tools").and_then(|v| v.as_array()) {
+            for tool in tools {
+                if let Some(function) = tool.get("function") {
+                    let name = function
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or_default();
+                    assert_ne!(
+                        name, "run_pr_checks",
+                        "review request should not include run_pr_checks tool"
+                    );
+                }
+            }
+        }
+    }
+}
+
+async fn build_standard_review_request(base: &str) -> ReviewRequest {
+    let size_hint = git_shortstat(base).await;
+    let size_hint_line = size_hint
+        .map(|stats| format!("Diff stats: {stats}"))
+        .unwrap_or_default();
+    let prompt = TEST_REVIEW_BRANCH_PROMPT_TMPL
+        .replace("{base}", base)
+        .replace("{size_hint_line}", &size_hint_line);
+    let hint = format!("changes against '{base}'");
+    ReviewRequest {
+        prompt,
+        user_facing_hint: hint,
+    }
+}
+
+async fn git_shortstat(base: &str) -> Option<String> {
+    let output = TokioCommand::new("git")
+        .args(["diff", "--shortstat", &format!("{base}...HEAD")])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .expect("run git diff");
+    if !(output.status.success() || output.status.code() == Some(1)) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_slash_command_executes_without_pr_checks_tool() {
+    let repo = setup_standard_review_repo();
+    let codex_home = TempDir::new().expect("codex home");
+
+    let review_request = with_repo_cwd(repo.path(), || async {
+        build_standard_review_request("main").await
+    })
+    .await;
+
+    let server = start_review_server(1).await;
+    let conversation = new_conversation_for_server(&server, &codex_home, repo.path()).await;
+
+    let _output = execute_review_request(&conversation, review_request).await;
+
+    assert_no_pr_checks(&server).await;
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deep_review_slash_command_batches_without_pr_checks_tool() {
+    let repo = setup_deep_review_repo();
+    let codex_home = TempDir::new().expect("codex home");
+
+    let (app_tx_raw, mut app_rx) = unbounded_channel::<AppEvent>();
+    let app_event_tx = AppEventSender::new(app_tx_raw);
+
+    let mut orchestrator = with_repo_cwd(repo.path(), || async {
+        Orchestrator::new(
+            app_event_tx.clone(),
+            "main".to_string(),
+            "deep review".to_string(),
+            REVIEW_BRANCH_LIMITS_FOR_TESTS,
+            TEST_REVIEW_BRANCH_BATCH_PROMPT_TMPL,
+            TEST_REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL,
+        )
+        .await
+        .expect("orchestrator")
+    })
+    .await;
+
+    assert!(orchestrator.has_batches(), "expected batching to occur");
+    let batch_count = orchestrator.batches.len();
+
+    let server = start_review_server(batch_count + 1).await;
+    let conversation = new_conversation_for_server(&server, &codex_home, repo.path()).await;
+
+    with_repo_cwd(repo.path(), || async {
+        orchestrator.start();
+    })
+    .await;
+
+    for _ in 0..batch_count {
+        let review_request = next_review_request(&mut app_rx).await;
+        let output = execute_review_request(&conversation, review_request).await;
+        orchestrator.on_batch_result(&output);
+    }
+
+    let consolidation_request = next_review_request(&mut app_rx).await;
+    let consolidation_output = execute_review_request(&conversation, consolidation_request).await;
+    orchestrator.on_consolidation_result(&consolidation_output);
+
+    assert_eq!(orchestrator.stage(), OrchestratorStage::Done);
+
+    assert_no_pr_checks(&server).await;
+    server.verify().await;
 }
 
 // E2E vt100 snapshot for complex markdown with indented and nested fenced code blocks
