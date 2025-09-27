@@ -200,7 +200,7 @@ async fn get_git_remotes(cwd: &Path) -> Option<Vec<String>> {
     let mut remotes: Vec<String> = String::from_utf8(output.stdout)
         .ok()?
         .lines()
-        .map(|s| s.to_string())
+        .map(str::to_string)
         .collect();
     if let Some(pos) = remotes.iter().position(|r| r == "origin") {
         let origin = remotes.remove(pos);
@@ -477,7 +477,7 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
         let untracked: Vec<String> = String::from_utf8(untracked_output.stdout)
             .ok()?
             .lines()
-            .map(|s| s.to_string())
+            .map(str::to_string)
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -589,6 +589,7 @@ pub async fn current_branch_name(cwd: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    use core_test_support::skip_if_sandbox;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -660,6 +661,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recent_commits_orders_and_limits() {
+        skip_if_sandbox!();
         use tokio::time::Duration;
         use tokio::time::sleep;
 

@@ -249,8 +249,8 @@ pub(crate) async fn open_subagent(
             }
         }
     } else {
-        use crate::config::SWIFTFOX_MEDIUM_MODEL;
-        child_config.model = SWIFTFOX_MEDIUM_MODEL.to_string();
+        use crate::config::GPT_5_CODEX_MEDIUM_MODEL;
+        child_config.model = GPT_5_CODEX_MEDIUM_MODEL.to_string();
         if let Some(model_family) = crate::model_family::find_family_for_model(&child_config.model)
         {
             child_config.model_family = model_family.clone();

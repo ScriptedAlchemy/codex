@@ -1,5 +1,10 @@
-use super::tests::{drain_insert_history, make_chatwidget_manual};
-use codex_core::protocol::{BackgroundEventEvent, Event, EventMsg, Op, TaskStartedEvent};
+use super::tests::drain_insert_history;
+use super::tests::make_chatwidget_manual;
+use codex_core::protocol::BackgroundEventEvent;
+use codex_core::protocol::Event;
+use codex_core::protocol::EventMsg;
+use codex_core::protocol::Op;
+use codex_core::protocol::TaskStartedEvent;
 use pretty_assertions::assert_eq;
 use std::path::PathBuf;
 

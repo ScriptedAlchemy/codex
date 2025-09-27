@@ -10,14 +10,14 @@ use crate::review_branch::chunker::ChunkLimits;
 use crate::review_branch::chunker::collect_branch_numstat;
 use crate::review_branch::chunker::score_and_chunk;
 
-#[derive(Debug)]
-pub(crate) struct OrchestratorConfig {
-    pub chunk_limits: ChunkLimits,
-    pub batch_prompt_tmpl: &'static str,
-    pub consolidation_prompt_tmpl: &'static str,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OrchestratorStage {
+    Batching,
+    Consolidation,
+    Done,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
     Batching,
     Consolidation,
@@ -42,10 +42,12 @@ impl Orchestrator {
         tx: AppEventSender,
         base: String,
         reason: String,
-        config: OrchestratorConfig,
+        limits: ChunkLimits,
+        batch_prompt_tmpl: &'static str,
+        consolidation_prompt_tmpl: &'static str,
     ) -> anyhow::Result<Self> {
         let rows = collect_branch_numstat(&base).await.unwrap_or_default();
-        let batches = score_and_chunk(rows, config.chunk_limits.clone());
+        let batches = score_and_chunk(rows, limits);
         Ok(Self {
             tx,
             base,
@@ -54,12 +56,21 @@ impl Orchestrator {
             idx: 0,
             acc: Vec::new(),
             stage: Stage::Batching,
-            batch_prompt_tmpl: config.batch_prompt_tmpl,
-            consolidation_prompt_tmpl: config.consolidation_prompt_tmpl,
+            batch_prompt_tmpl,
+            consolidation_prompt_tmpl,
         })
     }
+
     pub fn has_batches(&self) -> bool {
         !self.batches.is_empty()
+    }
+
+    pub fn stage(&self) -> OrchestratorStage {
+        match self.stage {
+            Stage::Batching => OrchestratorStage::Batching,
+            Stage::Consolidation => OrchestratorStage::Consolidation,
+            Stage::Done => OrchestratorStage::Done,
+        }
     }
 
     pub fn start(&mut self) {

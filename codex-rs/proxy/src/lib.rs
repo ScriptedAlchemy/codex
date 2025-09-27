@@ -274,7 +274,7 @@ fn hop_by_hop_set() -> HashSet<HeaderName> {
         "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
-        "te",
+        "te", // codespell:ignore te
         "trailer",
         "transfer-encoding",
         "upgrade",

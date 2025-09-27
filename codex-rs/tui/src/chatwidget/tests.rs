@@ -1,12 +1,13 @@
 use super::*;
 use crate::app_event::AppEvent;
+use crate::app_event::ReviewBranchMode;
 use crate::app_event_sender::AppEventSender;
+use crate::pr_checks::PrChecksOutcome;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
-use codex_core::config_types::Notifications as TuiNotifications;
 use codex_core::plan_tool::PlanItemArg;
 use codex_core::plan_tool::StepStatus;
 use codex_core::plan_tool::UpdatePlanArgs;
@@ -23,11 +24,11 @@ use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::FileChange;
+use codex_core::protocol::InputItem;
 use codex_core::protocol::InputMessageKind;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::PatchApplyEndEvent;
-use codex_core::protocol::RateLimitSnapshotEvent;
 use codex_core::protocol::ReviewCodeLocation;
 use codex_core::protocol::ReviewFinding;
 use codex_core::protocol::ReviewLineRange;
@@ -42,8 +43,6 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
-use ratatui::style::Color;
-use ratatui::style::Modifier;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -432,7 +431,6 @@ async fn helpers_are_available_and_do_not_panic() {
         initial_images: Vec::new(),
         enhanced_keys_supported: false,
         auth_manager,
-        tui_notifications: TuiNotifications::Enabled(false),
     };
     let mut w = ChatWidget::new(init, conversation_manager);
     // Basic construction sanity.
@@ -462,17 +460,18 @@ pub(crate) fn make_chatwidget_manual() -> (
         app_event_tx,
         codex_op_tx: op_tx,
         bottom_pane: bottom,
-        active_exec_cell: None,
+        active_cell: None,
         config: cfg.clone(),
         auth_manager,
-        session_header: SessionHeader::new(cfg.model.clone()),
+        session_header: SessionHeader::new(cfg.model),
         initial_user_message: None,
         token_info: None,
         rate_limit_snapshot: None,
         rate_limit_warnings: RateLimitWarningState::default(),
-        stream: StreamController::new(cfg),
+        stream_controller: None,
         running_commands: HashMap::new(),
         task_complete_pending: false,
+        pr_checks_in_progress: false,
         interrupts: InterruptManager::new(),
         reasoning_buffer: String::new(),
         full_reasoning_buffer: String::new(),
@@ -483,13 +482,13 @@ pub(crate) fn make_chatwidget_manual() -> (
         suppress_session_configured_redraw: false,
         pending_notification: None,
         is_review_mode: false,
-        suppress_next_review_render: false,
         review_orchestrator: None,
-        tui_notifications: TuiNotifications::Enabled(false),
         focused_subagent: None,
         subagents: std::collections::BTreeMap::new(),
         subagent_tasks: std::collections::BTreeSet::new(),
         subagent_status_messages: std::collections::BTreeMap::new(),
+        ghost_snapshots: Vec::new(),
+        ghost_snapshots_disabled: true,
     };
     (widget, rx, op_rx)
 }
@@ -532,155 +531,50 @@ fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) -> String {
     s
 }
 
-fn styled_lines_to_string(lines: &[ratatui::text::Line<'static>]) -> String {
-    let mut out = String::new();
-    for line in lines {
-        for span in &line.spans {
-            let mut tags: Vec<&str> = Vec::new();
-            if let Some(color) = span.style.fg {
-                let name = match color {
-                    Color::Black => "black",
-                    Color::Blue => "blue",
-                    Color::Cyan => "cyan",
-                    Color::DarkGray => "dark-gray",
-                    Color::Gray => "gray",
-                    Color::Green => "green",
-                    Color::LightBlue => "light-blue",
-                    Color::LightCyan => "light-cyan",
-                    Color::LightGreen => "light-green",
-                    Color::LightMagenta => "light-magenta",
-                    Color::LightRed => "light-red",
-                    Color::LightYellow => "light-yellow",
-                    Color::Magenta => "magenta",
-                    Color::Red => "red",
-                    Color::Rgb(_, _, _) => "rgb",
-                    Color::Indexed(_) => "indexed",
-                    Color::Reset => "reset",
-                    Color::Yellow => "yellow",
-                    Color::White => "white",
-                };
-                tags.push(name);
-            }
-            let modifiers = span.style.add_modifier;
-            if modifiers.contains(Modifier::BOLD) {
-                tags.push("bold");
-            }
-            if modifiers.contains(Modifier::DIM) {
-                tags.push("dim");
-            }
-            if modifiers.contains(Modifier::ITALIC) {
-                tags.push("italic");
-            }
-            if modifiers.contains(Modifier::UNDERLINED) {
-                tags.push("underlined");
-            }
-            if !tags.is_empty() {
-                out.push('[');
-                out.push_str(&tags.join("+"));
-                out.push(']');
-            }
-            out.push_str(&span.content);
-            if !tags.is_empty() {
-                out.push_str("[/]");
-            }
-        }
-        out.push('\n');
-    }
-    out
-}
-
-fn sample_rate_limit_snapshot(
-    primary_used_percent: f64,
-    weekly_used_percent: f64,
-    ratio_percent: f64,
-) -> RateLimitSnapshotEvent {
-    RateLimitSnapshotEvent {
-        primary_used_percent,
-        weekly_used_percent,
-        primary_to_weekly_ratio_percent: ratio_percent,
-        primary_window_minutes: 300,
-        weekly_window_minutes: 10_080,
-    }
-}
-
-fn capture_limits_snapshot(snapshot: Option<RateLimitSnapshotEvent>) -> String {
-    let lines = match snapshot {
-        Some(ref snapshot) => history_cell::new_limits_output(snapshot).display_lines(80),
-        None => history_cell::new_limits_unavailable().display_lines(80),
-    };
-    styled_lines_to_string(&lines)
-}
-
-#[test]
-fn limits_placeholder() {
-    let visual = capture_limits_snapshot(None);
-    assert_snapshot!(visual);
-}
-
-#[test]
-fn limits_snapshot_basic() {
-    let visual = capture_limits_snapshot(Some(sample_rate_limit_snapshot(30.0, 60.0, 40.0)));
-    assert_snapshot!(visual);
-}
-
-#[test]
-fn limits_snapshot_hourly_remaining() {
-    let visual = capture_limits_snapshot(Some(sample_rate_limit_snapshot(0.0, 20.0, 10.0)));
-    assert_snapshot!(visual);
-}
-
-#[test]
-fn limits_snapshot_mixed_usage() {
-    let visual = capture_limits_snapshot(Some(sample_rate_limit_snapshot(20.0, 20.0, 10.0)));
-    assert_snapshot!(visual);
-}
-
-#[test]
-fn limits_snapshot_weekly_heavy() {
-    let visual = capture_limits_snapshot(Some(sample_rate_limit_snapshot(98.0, 0.0, 10.0)));
-    assert_snapshot!(visual);
-}
-
 #[test]
 fn rate_limit_warnings_emit_thresholds() {
     let mut state = RateLimitWarningState::default();
     let mut warnings: Vec<String> = Vec::new();
 
-    warnings.extend(state.take_warnings(10.0, 55.0));
-    warnings.extend(state.take_warnings(55.0, 10.0));
-    warnings.extend(state.take_warnings(10.0, 80.0));
-    warnings.extend(state.take_warnings(80.0, 10.0));
-    warnings.extend(state.take_warnings(10.0, 95.0));
-    warnings.extend(state.take_warnings(95.0, 10.0));
+    warnings.extend(state.take_warnings(Some(10.0), Some(10079), Some(55.0), Some(299)));
+    warnings.extend(state.take_warnings(Some(55.0), Some(10081), Some(10.0), Some(299)));
+    warnings.extend(state.take_warnings(Some(10.0), Some(10081), Some(80.0), Some(299)));
+    warnings.extend(state.take_warnings(Some(80.0), Some(10081), Some(10.0), Some(299)));
+    warnings.extend(state.take_warnings(Some(10.0), Some(10081), Some(95.0), Some(299)));
+    warnings.extend(state.take_warnings(Some(95.0), Some(10079), Some(10.0), Some(299)));
 
     assert_eq!(
-        warnings.len(),
-        6,
-        "expected one warning per threshold per limit"
+        warnings,
+        vec![
+            String::from(
+                "Heads up, you've used over 75% of your 5h limit. Run /status for a breakdown."
+            ),
+            String::from(
+                "Heads up, you've used over 75% of your weekly limit. Run /status for a breakdown.",
+            ),
+            String::from(
+                "Heads up, you've used over 95% of your 5h limit. Run /status for a breakdown."
+            ),
+            String::from(
+                "Heads up, you've used over 95% of your weekly limit. Run /status for a breakdown.",
+            ),
+        ],
+        "expected one warning per limit for the highest crossed threshold"
     );
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("Hourly usage exceeded 50%")),
-        "expected hourly 50% warning"
-    );
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("Weekly usage exceeded 50%")),
-        "expected weekly 50% warning"
-    );
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("Hourly usage exceeded 90%")),
-        "expected hourly 90% warning"
-    );
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("Weekly usage exceeded 90%")),
-        "expected weekly 90% warning"
+}
+
+#[test]
+fn test_rate_limit_warnings_monthly() {
+    let mut state = RateLimitWarningState::default();
+    let mut warnings: Vec<String> = Vec::new();
+
+    warnings.extend(state.take_warnings(Some(75.0), Some(43199), None, None));
+    assert_eq!(
+        warnings,
+        vec![String::from(
+            "Heads up, you've used over 75% of your monthly limit. Run /status for a breakdown.",
+        ),],
+        "expected one warning per limit for the highest crossed threshold"
     );
 }
 
@@ -824,9 +718,9 @@ fn end_exec(chat: &mut ChatWidget, call_id: &str, stdout: &str, stderr: &str, ex
 
 fn active_blob(chat: &ChatWidget) -> String {
     let lines = chat
-        .active_exec_cell
+        .active_cell
         .as_ref()
-        .expect("active exec cell present")
+        .expect("active cell present")
         .display_lines(80);
     lines_to_single_string(&lines)
 }
@@ -963,9 +857,9 @@ fn review_popup_custom_prompt_action_sends_event() {
     chat.open_review_popup();
 
     // Move selection down to the fourth item: "Custom review instructions"
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    for _ in 0..4 {
+        chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
     // Activate
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -1115,7 +1009,7 @@ fn interrupt_exec_marks_failed_snapshot() {
 /// parent popup, pressing Esc again dismisses all panels (back to normal mode).
 #[test]
 fn review_custom_prompt_escape_navigates_back_then_dismisses() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
 
     // Open the Review presets parent popup.
     chat.open_review_popup();
@@ -1132,13 +1026,6 @@ fn review_custom_prompt_escape_navigates_back_then_dismisses() {
 
     // Esc once: child view closes, parent (review presets) remains.
     chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    // Process emitted app events to reopen the parent review popup.
-    while let Ok(ev) = rx.try_recv() {
-        if let AppEvent::OpenReviewPopup = ev {
-            chat.open_review_popup();
-            break;
-        }
-    }
     let header = render_bottom_first_row(&chat, 60);
     assert!(
         header.contains("Select a review preset"),
@@ -1157,14 +1044,15 @@ fn review_custom_prompt_escape_navigates_back_then_dismisses() {
 /// parent popup, pressing Esc again dismisses all panels (back to normal mode).
 #[tokio::test(flavor = "current_thread")]
 async fn review_branch_picker_escape_navigates_back_then_dismisses() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
 
     // Open the Review presets parent popup.
     chat.open_review_popup();
 
     // Open the branch picker submenu (child view). Using a temp cwd with no git repo is fine.
     let cwd = std::env::temp_dir();
-    chat.show_review_branch_picker(&cwd).await;
+    chat.show_review_branch_picker(&cwd, ReviewBranchMode::Standard)
+        .await;
 
     // Verify child view header.
     let header = render_bottom_first_row(&chat, 60);
@@ -1175,13 +1063,6 @@ async fn review_branch_picker_escape_navigates_back_then_dismisses() {
 
     // Esc once: child view closes, parent remains.
     chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    // Process emitted app events to reopen the parent review popup.
-    while let Ok(ev) = rx.try_recv() {
-        if let AppEvent::OpenReviewPopup = ev {
-            chat.open_review_popup();
-            break;
-        }
-    }
     let header = render_bottom_first_row(&chat, 60);
     assert!(
         header.contains("Select a review preset"),
@@ -1322,7 +1203,10 @@ async fn binary_size_transcript_snapshot() {
                                     call_id: e.call_id.clone(),
                                     command: e.command,
                                     cwd: e.cwd,
-                                    parsed_cmd: parsed_cmd.into_iter().map(|c| c.into()).collect(),
+                                    parsed_cmd: parsed_cmd
+                                        .into_iter()
+                                        .map(std::convert::Into::into)
+                                        .collect(),
                                 }),
                             }
                         }
@@ -1399,7 +1283,7 @@ async fn binary_size_transcript_snapshot() {
         // Trim trailing spaces to match plain text fixture
         lines.push(s.trim_end().to_string());
     }
-    while lines.last().is_some_and(|l| l.is_empty()) {
+    while lines.last().is_some_and(std::string::String::is_empty) {
         lines.pop();
     }
     // Consider content only after the last session banner marker. Skip the transient
@@ -1583,6 +1467,40 @@ fn interrupt_restores_queued_messages_into_composer() {
     let _ = drain_insert_history(&mut rx);
 }
 
+#[test]
+fn interrupt_prepends_queued_messages_before_existing_composer_text() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    chat.bottom_pane.set_task_running(true);
+    chat.bottom_pane
+        .set_composer_text("current draft".to_string());
+
+    chat.queued_user_messages
+        .push_back(UserMessage::from("first queued".to_string()));
+    chat.queued_user_messages
+        .push_back(UserMessage::from("second queued".to_string()));
+    chat.refresh_queued_user_messages();
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnAborted(codex_core::protocol::TurnAbortedEvent {
+            reason: TurnAbortReason::Interrupted,
+        }),
+    });
+
+    assert_eq!(
+        chat.bottom_pane.composer_text(),
+        "first queued\nsecond queued\ncurrent draft"
+    );
+    assert!(chat.queued_user_messages.is_empty());
+    assert!(
+        op_rx.try_recv().is_err(),
+        "unexpected outbound op after interrupt"
+    );
+
+    let _ = drain_insert_history(&mut rx);
+}
+
 // Snapshot test: ChatWidget at very small heights (idle)
 // Ensures overall layout behaves when terminal height is extremely constrained.
 #[test]
@@ -1627,6 +1545,132 @@ fn ui_snapshots_small_heights_task_running() {
             .draw(|f| f.render_widget_ref(&chat, f.area()))
             .expect("draw chat running");
         assert_snapshot!(name, terminal.backend());
+    }
+}
+
+#[test]
+fn pr_checks_success_records_info_history() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+    chat.pr_checks_in_progress = true;
+
+    chat.on_pr_checks_finished(PrChecksOutcome {
+        success: true,
+        exit_status: Some(0),
+        stdout: "all checks passing".into(),
+        stderr: String::new(),
+        spawn_error: None,
+    });
+
+    assert!(!chat.pr_checks_in_progress, "flag should reset");
+    assert!(
+        op_rx.try_recv().is_err(),
+        "success should not send user input"
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected single info entry");
+    let blob = lines_to_single_string(cells.last().unwrap());
+    assert!(
+        blob.contains("`gh pr checks --watch` completed successfully."),
+        "info entry should mention success"
+    );
+    assert!(
+        blob.contains("stdout:\n```\nall checks passing"),
+        "info entry should include stdout snippet"
+    );
+}
+
+#[test]
+fn pr_checks_failure_sends_fix_prompt() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    chat.on_pr_checks_finished(PrChecksOutcome {
+        success: false,
+        exit_status: Some(1),
+        stdout: "lint failure".into(),
+        stderr: "test panic".into(),
+        spawn_error: None,
+    });
+
+    assert!(!chat.pr_checks_in_progress, "flag should reset");
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.iter().any(|lines| {
+            let blob = lines_to_single_string(lines);
+            blob.contains("failed with exit code 1")
+        }),
+        "history should contain failure error message"
+    );
+
+    let op = op_rx.try_recv().expect("expected user prompt");
+    match op {
+        Op::UserInput { items } => {
+            assert_eq!(items.len(), 1);
+            match &items[0] {
+                InputItem::Text { text } => {
+                    assert!(
+                        text.contains("Please fix the issues reported by the PR checks."),
+                        "submitted prompt should instruct fixing"
+                    );
+                    assert!(
+                        text.contains("stdout:\n```\nlint failure"),
+                        "prompt should include stdout snippet"
+                    );
+                    assert!(
+                        text.contains("stderr:\n```\ntest panic"),
+                        "prompt should include stderr snippet"
+                    );
+                    assert!(
+                        text.contains("run the `run_pr_checks` tool"),
+                        "prompt should point to run_pr_checks tool"
+                    );
+                }
+                other => panic!("unexpected input item: {other:?}"),
+            }
+        }
+        other => panic!("unexpected op: {other:?}"),
+    }
+}
+
+#[test]
+fn pr_checks_spawn_error_reports_issue() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    chat.on_pr_checks_finished(PrChecksOutcome::failure_with_error(
+        "gh executable not found".into(),
+    ));
+
+    assert!(!chat.pr_checks_in_progress, "flag should reset");
+
+    let cells = drain_insert_history(&mut rx);
+    assert!(
+        cells.iter().any(|lines| {
+            let blob = lines_to_single_string(lines);
+            blob.contains("could not be executed")
+        }),
+        "history should mention spawn error"
+    );
+
+    let op = op_rx.try_recv().expect("expected user prompt");
+    match op {
+        Op::UserInput { items } => {
+            assert_eq!(items.len(), 1);
+            match &items[0] {
+                InputItem::Text { text } => {
+                    assert!(
+                        text.contains("gh executable not found"),
+                        "prompt should include spawn error"
+                    );
+                    assert!(
+                        text.contains("run the `run_pr_checks` tool"),
+                        "prompt should point to run_pr_checks tool"
+                    );
+                }
+                other => panic!("unexpected input item: {other:?}"),
+            }
+        }
+        other => panic!("unexpected op: {other:?}"),
     }
 }
 
@@ -2285,8 +2329,12 @@ fn deltas_then_same_final_message_are_rendered_snapshot() {
 // then the exec block, another blank line, the status line, a blank line, and the composer.
 #[test]
 fn chatwidget_exec_and_status_layout_vt100_snapshot() {
-    // Setup identical scenario
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+    chat.handle_codex_event(Event {
+        id: "t1".into(),
+        msg: EventMsg::AgentMessage(AgentMessageEvent { message: "I’m going to search the repo for where “Change Approved” is rendered to update that view.".into() }),
+    });
+
     chat.handle_codex_event(Event {
         id: "c1".into(),
         msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
@@ -2334,10 +2382,6 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
     });
     chat.bottom_pane
         .set_composer_text("Summarize recent commits".to_string());
-    chat.handle_codex_event(Event {
-        id: "t1".into(),
-        msg: EventMsg::AgentMessage(AgentMessageEvent { message: "I’m going to search the repo for where “Change Approved” is rendered to update that view.".into() }),
-    });
 
     // Dimensions
     let width: u16 = 80;
