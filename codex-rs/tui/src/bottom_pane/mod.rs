@@ -344,7 +344,7 @@ impl BottomPane {
 
     /// Update the queued messages shown under the status header.
     pub(crate) fn set_queued_user_messages(&mut self, queued: Vec<String>) {
-        self.queued_user_messages = queued.clone();
+        self.queued_user_messages = queued;
         self.update_status_lines();
         self.request_redraw();
     }
@@ -362,11 +362,9 @@ impl BottomPane {
     }
 
     pub(crate) fn clear_status_if_idle(&mut self) {
-        if !self.is_task_running && self.status_messages.is_empty() {
-            if self.status.is_some() {
-                self.status = None;
-                self.request_redraw();
-            }
+        if !self.is_task_running && self.status_messages.is_empty() && self.status.is_some() {
+            self.status = None;
+            self.request_redraw();
         }
     }
 
@@ -381,7 +379,7 @@ impl BottomPane {
 
     #[cfg(test)]
     pub(crate) fn status_header(&self) -> Option<&str> {
-        self.status.as_ref().map(|s| s.header())
+        self.status.as_ref().map(StatusIndicatorWidget::header)
     }
 
     fn update_status_lines(&mut self) {

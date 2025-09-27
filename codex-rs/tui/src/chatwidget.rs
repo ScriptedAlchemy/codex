@@ -400,20 +400,20 @@ impl ChatWidget {
     }
 
     fn handle_task_started(&mut self, source_id: Option<&str>) {
-        if let Some(id) = source_id {
-            if self.subagents.contains_key(id) {
-                self.subagent_tasks.insert(id.to_string());
-                let default = self
-                    .subagents
-                    .get(id)
-                    .map(|desc| format!("Subagent {id}: {desc}"))
-                    .unwrap_or_else(|| format!("Subagent {id}: running"));
-                self.subagent_status_messages
-                    .entry(id.to_string())
-                    .or_insert(default);
-                self.update_subagent_status_panel();
-                return;
-            }
+        if let Some(id) = source_id
+            && self.subagents.contains_key(id)
+        {
+            self.subagent_tasks.insert(id.to_string());
+            let default = self
+                .subagents
+                .get(id)
+                .map(|desc| format!("Subagent {id}: {desc}"))
+                .unwrap_or_else(|| format!("Subagent {id}: running"));
+            self.subagent_status_messages
+                .entry(id.to_string())
+                .or_insert(default);
+            self.update_subagent_status_panel();
+            return;
         }
         self.on_task_started();
     }
@@ -423,26 +423,26 @@ impl ChatWidget {
         source_id: Option<&str>,
         last_agent_message: Option<String>,
     ) {
-        if let Some(id) = source_id {
-            if self.subagents.contains_key(id) {
-                self.subagent_tasks.remove(id);
-                self.subagent_status_messages.remove(id);
-                self.update_subagent_status_panel();
-                return;
-            }
+        if let Some(id) = source_id
+            && self.subagents.contains_key(id)
+        {
+            self.subagent_tasks.remove(id);
+            self.subagent_status_messages.remove(id);
+            self.update_subagent_status_panel();
+            return;
         }
         self.on_task_complete(last_agent_message);
     }
 
     fn handle_turn_aborted(&mut self, source_id: Option<&str>, reason: TurnAbortReason) {
-        if let Some(id) = source_id {
-            if self.subagents.contains_key(id) {
-                self.subagent_tasks.remove(id);
-                self.subagent_status_messages
-                    .insert(id.to_string(), format!("Subagent {id}: interrupted"));
-                self.update_subagent_status_panel();
-                return;
-            }
+        if let Some(id) = source_id
+            && self.subagents.contains_key(id)
+        {
+            self.subagent_tasks.remove(id);
+            self.subagent_status_messages
+                .insert(id.to_string(), format!("Subagent {id}: interrupted"));
+            self.update_subagent_status_panel();
+            return;
         }
         match reason {
             TurnAbortReason::Interrupted | TurnAbortReason::ReviewEnded => {
