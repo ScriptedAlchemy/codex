@@ -252,7 +252,7 @@ mod tests {
                 expects_apply_patch_instructions: false,
             },
             InstructionsTestCase {
-                slug: "swiftfox-medium",
+                slug: "gpt-5-codex",
                 expects_apply_patch_instructions: false,
             },
         ];
@@ -288,7 +288,6 @@ mod tests {
             use_streamable_shell_tool: false,
             include_view_image_tool: true,
             include_subagent_tool: true,
-            include_pr_checks_tool: true,
             experimental_unified_exec_tool: true,
         });
         let tools = get_openai_tools(&tools_config, Some(std::collections::HashMap::new()));

@@ -275,18 +275,7 @@ pub(crate) async fn stream_chat_completions(
 
     let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
 
-    // Mirror the Responses mapping for chat-compatible providers as well,
-    // so selecting a swiftfox-* preset in the UI still works when the
-    // underlying endpoint expects gpt-5-codex.
-    fn api_model_slug_for_chat(ui_slug: &str) -> String {
-        if ui_slug.starts_with("swiftfox-") {
-            "gpt-5-codex".to_string()
-        } else {
-            ui_slug.to_string()
-        }
-    }
-
-    let api_model = api_model_slug_for_chat(&model_family.slug);
+    let api_model = &model_family.slug;
     let payload = json!({
         "model": api_model,
         "messages": messages,

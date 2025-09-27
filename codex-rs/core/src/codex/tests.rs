@@ -38,17 +38,16 @@ fn build_session_for_subagent_tests(
         config.model_reasoning_summary,
         conversation_id,
     );
-    let tools_config = ToolsConfig::new(&ToolsConfigParams {
-        model_family: &config.model_family,
-        include_plan_tool: config.include_plan_tool,
-        include_apply_patch_tool: config.include_apply_patch_tool,
-        include_web_search_request: config.tools_web_search_request,
-        use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
-        include_view_image_tool: config.include_view_image_tool,
-        include_subagent_tool: config.include_subagent_tool,
-        include_pr_checks_tool: true,
-        experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
-    });
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_family: &config.model_family,
+            include_plan_tool: config.include_plan_tool,
+            include_apply_patch_tool: config.include_apply_patch_tool,
+            include_web_search_request: config.tools_web_search_request,
+            use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
+            include_view_image_tool: config.include_view_image_tool,
+            include_subagent_tool: config.include_subagent_tool,
+            experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
+        });
 
     let turn_context = TurnContext {
         client,
@@ -649,17 +648,16 @@ pub(crate) fn make_session_and_context() -> (Session, TurnContext) {
         config.model_reasoning_summary,
         conversation_id,
     );
-    let tools_config = ToolsConfig::new(&ToolsConfigParams {
-        model_family: &config.model_family,
-        include_plan_tool: config.include_plan_tool,
-        include_apply_patch_tool: config.include_apply_patch_tool,
-        include_web_search_request: config.tools_web_search_request,
-        use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
-        include_view_image_tool: config.include_view_image_tool,
-        include_subagent_tool: config.include_subagent_tool,
-        include_pr_checks_tool: true,
-        experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
-    });
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_family: &config.model_family,
+            include_plan_tool: config.include_plan_tool,
+            include_apply_patch_tool: config.include_apply_patch_tool,
+            include_web_search_request: config.tools_web_search_request,
+            use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
+            include_view_image_tool: config.include_view_image_tool,
+            include_subagent_tool: config.include_subagent_tool,
+            experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
+        });
     let turn_context = TurnContext {
         client,
         cwd: config.cwd.clone(),

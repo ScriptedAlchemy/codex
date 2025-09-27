@@ -11,7 +11,12 @@ import { MODEL_CANDIDATES, selectPreferredModel } from "../src/lib/config.js";
 console.log("Testing model configuration...");
 
 // Verify expected models are present
-const expectedModels = ["swiftfox-medium", "swiftfox-high", "swiftfox-low", "gpt-5"];
+const expectedModels = [
+  "gpt-5-codex-high",
+  "gpt-5-codex",
+  "gpt-5-high",
+  "gpt-5"
+];
 
 console.log("Available model candidates:", MODEL_CANDIDATES);
 
@@ -50,17 +55,17 @@ for (const model of unwantedModels) {
 const defaultModel = selectPreferredModel();
 console.log(`Default model: ${defaultModel}`);
 
-if (defaultModel !== "swiftfox-medium") {
-  console.error(`❌ Expected default model 'swiftfox-medium', got '${defaultModel}'`);
+if (defaultModel !== "gpt-5-codex-high") {
+  console.error(`❌ Expected default model 'gpt-5-codex-high', got '${defaultModel}'`);
   process.exit(1);
 } else {
   console.log(`✅ Default model is correctly set to '${defaultModel}'`);
 }
 
 // Test with explicit model selection
-const explicitModel = selectPreferredModel("swiftfox-high");
-if (explicitModel !== "swiftfox-high") {
-  console.error(`❌ Expected explicit model 'swiftfox-high', got '${explicitModel}'`);
+const explicitModel = selectPreferredModel("gpt-5-codex-high");
+if (explicitModel !== "gpt-5-codex-high") {
+  console.error(`❌ Expected explicit model 'gpt-5-codex-high', got '${explicitModel}'`);
   process.exit(1);
 } else {
   console.log(`✅ Explicit model selection works: '${explicitModel}'`);
@@ -68,8 +73,8 @@ if (explicitModel !== "swiftfox-high") {
 
 // Test with null/undefined
 const nullModel = selectPreferredModel(null);
-if (nullModel !== "swiftfox-medium") {
-  console.error(`❌ Expected fallback to 'swiftfox-medium' for null, got '${nullModel}'`);
+if (nullModel !== "gpt-5-codex-high") {
+  console.error(`❌ Expected fallback to 'gpt-5-codex-high' for null, got '${nullModel}'`);
   process.exit(1);
 } else {
   console.log(`✅ Null model selection falls back correctly: '${nullModel}'`);

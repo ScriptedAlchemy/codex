@@ -704,8 +704,7 @@ async fn review_slash_command_handles_subagent_tool_shape() {
 
     assert!(
         submit_result.is_ok(),
-        "expected review submission to succeed without HTTP 400, got {:?}",
-        submit_result
+        "expected review submission to succeed without HTTP 400, got {submit_result:?}"
     );
 
     let _entered = wait_for_event(&codex, |ev| matches!(ev, EventMsg::EnteredReviewMode(_))).await;

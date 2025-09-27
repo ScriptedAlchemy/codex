@@ -1,11 +1,10 @@
 export const MODEL_CANDIDATES: readonly string[] = [
-  // Align with main branch: the Codex line uses swiftfox-* slugs.
-  // Default to swiftfox-medium for balance, with explicit high/low as alternates.
-  "swiftfox-medium",
-  "swiftfox-high",
-  "swiftfox-low",
-
-  // Plain GPT‑5 as a fallback option.
+  // Codex variants (preferred for coding tasks)
+  "gpt-5-codex-high",
+  "gpt-5-codex",
+  
+  // GPT-5 variants (fallback options)
+  "gpt-5-high",
   "gpt-5",
 ];
 
