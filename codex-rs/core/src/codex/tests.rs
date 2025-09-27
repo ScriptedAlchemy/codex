@@ -125,8 +125,8 @@ fn subagent_tool_calls_emit_background_events() {
 
     // Parse subagent_id from the tool-call output
     let subagent_id = match res {
-        ResponseInputItem::CustomToolCallOutput { output, .. } => {
-            let v: serde_json::Value = serde_json::from_str(&output).expect("json");
+        ResponseInputItem::FunctionCallOutput { output, .. } => {
+            let v: serde_json::Value = serde_json::from_str(&output.content).expect("json");
             v.get("subagent_id")
                 .and_then(|s| s.as_str())
                 .expect("subagent_id")
@@ -307,8 +307,9 @@ async fn subagent_reply_nonblocking_is_async() {
     .await;
 
     let accepted = match response {
-        ResponseInputItem::CustomToolCallOutput { output, .. } => {
-            let value: serde_json::Value = serde_json::from_str(&output).expect("valid json output");
+        ResponseInputItem::FunctionCallOutput { output, .. } => {
+            let value: serde_json::Value =
+                serde_json::from_str(&output.content).expect("valid json output");
             value
                 .get("accepted")
                 .and_then(|v| v.as_bool())

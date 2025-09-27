@@ -1767,11 +1767,11 @@ pub(crate) async fn run_task(
                         }
                         (
                             ResponseItem::CustomToolCall { .. },
-                            Some(ResponseInputItem::CustomToolCallOutput { call_id, output }),
+                            Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
                         ) => {
                             items_to_record_in_conversation_history.push(item);
                             items_to_record_in_conversation_history.push(
-                                ResponseItem::CustomToolCallOutput {
+                                ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
                                     output: output.clone(),
                                 },
@@ -2068,9 +2068,12 @@ async fn try_run_turn(
                     Some(call_id.clone())
                 }
             })
-            .map(|call_id| ResponseItem::CustomToolCallOutput {
+            .map(|call_id| ResponseItem::FunctionCallOutput {
                 call_id,
-                output: "aborted".to_string(),
+                output: FunctionCallOutputPayload {
+                    content: "aborted".to_string(),
+                    success: Some(false),
+                },
             })
             .collect::<Vec<_>>()
     };
@@ -2347,11 +2350,14 @@ async fn handle_response_item(
             )
             .await;
 
-            let output = match result {
-                Ok(content) => content,
-                Err(FunctionCallError::RespondToModel(msg)) => msg,
+            let (content, success) = match result {
+                Ok(content) => (content, Some(true)),
+                Err(FunctionCallError::RespondToModel(msg)) => (msg, Some(false)),
             };
-            Some(ResponseInputItem::CustomToolCallOutput { call_id, output })
+            Some(ResponseInputItem::FunctionCallOutput {
+                call_id,
+                output: FunctionCallOutputPayload { content, success },
+            })
         }
         ResponseItem::FunctionCallOutput { .. } => {
             debug!("unexpected FunctionCallOutput from stream");
