@@ -109,11 +109,6 @@ impl StatusIndicatorWidget {
         self.frame_requester.schedule_frame();
     }
 
-    #[cfg(test)]
-    pub(crate) fn header(&self) -> &str {
-        &self.header
-    }
-
     pub(crate) fn pause_timer(&mut self) {
         self.pause_timer_at(Instant::now());
     }

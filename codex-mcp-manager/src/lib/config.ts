@@ -19,20 +19,3 @@ export function selectPreferredModel(
   }
   return MODEL_CANDIDATES.find(Boolean) ?? null;
 }
-
-export type Effort = "minimal" | "low" | "medium" | "high";
-
-/**
- * Returns a new config object with `model_reasoning_effort` set when `effort` is provided.
- * Does not mutate the input; preserves existing keys.
- */
-export function applyEffortIntoConfig(
-  base: Record<string, unknown> | undefined,
-  effort?: Effort,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...(base ?? {}) };
-  if (effort) {
-    out.model_reasoning_effort = effort;
-  }
-  return out;
-}

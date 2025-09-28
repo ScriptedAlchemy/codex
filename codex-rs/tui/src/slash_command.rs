@@ -100,16 +100,5 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
 }
 
 fn beta_features_enabled() -> bool {
-    match std::env::var("BETA_FEATURE") {
-        Ok(raw) => {
-            let value = raw.trim().to_ascii_lowercase();
-            if value.is_empty() {
-                true
-            } else {
-                !matches!(value.as_str(), "0" | "false" | "no" | "off")
-            }
-        }
-        Err(std::env::VarError::NotPresent) => true,
-        Err(std::env::VarError::NotUnicode(_)) => true,
-    }
+    std::env::var_os("BETA_FEATURE").is_some()
 }

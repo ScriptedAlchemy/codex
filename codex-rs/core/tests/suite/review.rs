@@ -22,25 +22,16 @@ use codex_core::protocol::RolloutItem;
 use codex_core::protocol::RolloutLine;
 use core_test_support::load_default_config_for_test;
 use core_test_support::load_sse_fixture_with_id_from_str;
-use core_test_support::responses::ev_assistant_message;
-use core_test_support::responses::ev_completed;
-use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
-use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt as _;
 use uuid::Uuid;
-
 use wiremock::Mock;
 use wiremock::MockServer;
-use wiremock::Request;
-use wiremock::Respond;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
@@ -602,122 +593,6 @@ async fn review_history_does_not_leak_into_parent_session() {
     assert!(
         !contains_review_assistant,
         "review assistant output leaked into parent turn input"
-    );
-
-    server.verify().await;
-}
-
-struct ReviewResponder {
-    first: String,
-    success: String,
-    calls: AtomicUsize,
-}
-
-impl ReviewResponder {
-    fn new(first: String, success: String) -> Self {
-        Self {
-            first,
-            success,
-            calls: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl Respond for ReviewResponder {
-    fn respond(&self, request: &Request) -> ResponseTemplate {
-        let call_num = self.calls.fetch_add(1, Ordering::SeqCst);
-        if call_num == 0 {
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(self.first.clone())
-        } else {
-            let body = String::from_utf8_lossy(&request.body);
-            if body.contains("\"custom_tool_call_output\"") {
-                ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                    "error": {
-                        "message": "custom tool outputs must use function_call_output",
-                    }
-                }))
-            } else {
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(self.success.clone())
-            }
-        }
-    }
-}
-
-/// Regression test for the `/review` slash command: the follow-up request after
-/// handling a subagent tool call must send a `function_call_output` item rather
-/// than a `custom_tool_call_output`. The latter causes the Responses API to
-/// reject the request with HTTP 400, which is the behavior reported in the bug.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn review_slash_command_handles_subagent_tool_shape() {
-    let server = core_test_support::responses::start_mock_server().await;
-
-    let tool_call_body = sse(vec![
-        serde_json::json!({
-            "type": "response.output_item.done",
-            "item": {
-                "type": "custom_tool_call",
-                "name": "subagent_open",
-                "call_id": "subagent-call",
-                "input": "{\"goal\":\"Review the current workspace changes\"}"
-            }
-        }),
-        ev_completed("review-tool-call"),
-    ]);
-
-    let review_payload = serde_json::json!({
-        "findings": [],
-        "overall_correctness": "ok",
-        "overall_explanation": "done",
-        "overall_confidence_score": 0.5
-    })
-    .to_string();
-
-    let success_body = sse(vec![
-        ev_assistant_message("review-final", &review_payload),
-        ev_completed("review-success"),
-    ]);
-
-    Mock::given(method("POST"))
-        .and(path("/v1/responses"))
-        .respond_with(ReviewResponder::new(tool_call_body, success_body))
-        .mount(&server)
-        .await;
-
-    let fixture = test_codex()
-        .build(&server)
-        .await
-        .expect("create conversation");
-    let codex = fixture.codex;
-
-    let submit_result = codex
-        .submit(Op::Review {
-            review_request: ReviewRequest {
-                prompt: "trigger review".to_string(),
-                user_facing_hint: "review".to_string(),
-            },
-        })
-        .await;
-
-    assert!(
-        submit_result.is_ok(),
-        "expected review submission to succeed without HTTP 400, got {submit_result:?}"
-    );
-
-    let _entered = wait_for_event(&codex, |ev| matches!(ev, EventMsg::EnteredReviewMode(_))).await;
-    let _exited = wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExitedReviewMode(_))).await;
-
-    let requests = server
-        .received_requests()
-        .await
-        .expect("read recorded requests");
-    assert_eq!(
-        requests.len(),
-        2,
-        "expected exactly two Responses API calls (initial + follow-up)"
     );
 
     server.verify().await;

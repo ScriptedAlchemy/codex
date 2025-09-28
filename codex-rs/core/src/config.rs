@@ -179,9 +179,6 @@ pub struct Config {
 
     pub tools_web_search_request: bool,
 
-    /// Include the experimental subagent tool suite that enables spawning and chatting with child Codex instances.
-    pub include_subagent_tool: bool,
-
     pub use_experimental_streamable_shell_tool: bool,
 
     /// If set to `true`, used only the experimental unified exec tool.
@@ -418,7 +415,7 @@ fn set_project_trusted_inner(doc: &mut DocumentMut, project_path: &Path) -> anyh
         .get_mut(project_key.as_str())
         .and_then(|i| i.as_table_mut())
     else {
-        return Err(anyhow::anyhow!("project table missing for {project_key}"));
+        return Err(anyhow::anyhow!("project table missing for {}", project_key));
     };
     proj_tbl.set_implicit(false);
     proj_tbl["trust_level"] = toml_edit::value("trusted");
@@ -749,10 +746,6 @@ pub struct ToolsToml {
     /// Enable the `view_image` tool that lets the agent attach local images.
     #[serde(default)]
     pub view_image: Option<bool>,
-
-    /// Enable the experimental subagent tool suite.
-    #[serde(default)]
-    pub subagent: Option<bool>,
 }
 
 impl From<ToolsToml> for Tools {
@@ -760,9 +753,6 @@ impl From<ToolsToml> for Tools {
         Self {
             web_search: tools_toml.web_search,
             view_image: tools_toml.view_image,
-            // Default subagent to true when [tools] is present but the key is omitted.
-            // Parent agent has subagents enabled by default; nested agents remain constrained by depth.
-            subagent: Some(tools_toml.subagent.unwrap_or(true)),
         }
     }
 }
@@ -856,7 +846,6 @@ pub struct ConfigOverrides {
     pub include_plan_tool: Option<bool>,
     pub include_apply_patch_tool: Option<bool>,
     pub include_view_image_tool: Option<bool>,
-    pub include_subagent_tool: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
     pub tools_web_search_request: Option<bool>,
 }
@@ -885,7 +874,6 @@ impl Config {
             include_plan_tool,
             include_apply_patch_tool,
             include_view_image_tool,
-            include_subagent_tool,
             show_raw_agent_reasoning,
             tools_web_search_request: override_tools_web_search_request,
         } = overrides;
@@ -959,10 +947,6 @@ impl Config {
 
         let include_view_image_tool = include_view_image_tool
             .or(cfg.tools.as_ref().and_then(|t| t.view_image))
-            .unwrap_or(true);
-
-        let include_subagent_tool = include_subagent_tool
-            .or(cfg.tools.as_ref().and_then(|t| t.subagent))
             .unwrap_or(true);
 
         let model = model
@@ -1058,7 +1042,6 @@ impl Config {
             include_plan_tool: include_plan_tool.unwrap_or(false),
             include_apply_patch_tool: include_apply_patch_tool.unwrap_or(false),
             tools_web_search_request,
-            include_subagent_tool,
             use_experimental_streamable_shell_tool: cfg
                 .experimental_use_exec_command_tool
                 .unwrap_or(false),
@@ -1676,7 +1659,6 @@ model_verbosity = "high"
                 use_experimental_unified_exec_tool: false,
                 use_experimental_use_rmcp_client: false,
                 include_view_image_tool: true,
-                include_subagent_tool: true,
                 active_profile: Some("o3".to_string()),
                 disable_paste_burst: false,
                 tui_notifications: Default::default(),
@@ -1736,7 +1718,6 @@ model_verbosity = "high"
             use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
-            include_subagent_tool: true,
             active_profile: Some("gpt3".to_string()),
             disable_paste_burst: false,
             tui_notifications: Default::default(),
@@ -1811,7 +1792,6 @@ model_verbosity = "high"
             use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
-            include_subagent_tool: true,
             active_profile: Some("zdr".to_string()),
             disable_paste_burst: false,
             tui_notifications: Default::default(),
@@ -1872,7 +1852,6 @@ model_verbosity = "high"
             use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
-            include_subagent_tool: true,
             active_profile: Some("gpt5".to_string()),
             disable_paste_burst: false,
             tui_notifications: Default::default(),

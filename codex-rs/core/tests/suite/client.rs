@@ -16,7 +16,6 @@ use codex_core::built_in_model_providers;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
-use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use codex_protocol::mcp_protocol::ConversationId;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::WebSearchAction;
@@ -616,73 +615,6 @@ async fn includes_user_instructions_message_in_request() {
     assert_message_role(&request_body["input"][1], "user");
     assert_message_starts_with(&request_body["input"][1], "<environment_context>");
     assert_message_ends_with(&request_body["input"][1], "</environment_context>");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn instructions_payload_stays_within_responses_limit() {
-    if std::env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
-        println!(
-            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
-        );
-        return;
-    }
-
-    const RESPONSES_INSTRUCTIONS_LIMIT: usize = 28_000;
-
-    let server = MockServer::start().await;
-
-    let template = ResponseTemplate::new(200)
-        .insert_header("content-type", "text/event-stream")
-        .set_body_raw(sse_completed("resp1"), "text/event-stream");
-
-    Mock::given(method("POST"))
-        .and(path("/v1/responses"))
-        .respond_with(template)
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let model_provider = ModelProviderInfo {
-        base_url: Some(format!("{}/v1", server.uri())),
-        ..built_in_model_providers()["openai"].clone()
-    };
-
-    let codex_home = TempDir::new().unwrap();
-    let mut config = load_default_config_for_test(&codex_home);
-    config.model_provider = model_provider;
-
-    let conversation_manager =
-        ConversationManager::with_auth(CodexAuth::from_api_key("Test API Key"));
-    let codex = conversation_manager
-        .new_conversation(config)
-        .await
-        .expect("create new conversation")
-        .conversation;
-
-    codex
-        .submit(Op::UserInput {
-            items: vec![InputItem::Text {
-                text: "hello".into(),
-            }],
-        })
-        .await
-        .unwrap();
-
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
-
-    let request = &server.received_requests().await.unwrap()[0];
-    let request_body = request.body_json::<serde_json::Value>().unwrap();
-
-    let instructions = request_body["instructions"]
-        .as_str()
-        .expect("instructions field missing");
-    let len = instructions.len();
-    assert!(
-        len <= RESPONSES_INSTRUCTIONS_LIMIT,
-        "instructions payload was {len} bytes, exceeding limit {RESPONSES_INSTRUCTIONS_LIMIT}"
-    );
-
-    // No additional expectations: we only verify size is within the limit.
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

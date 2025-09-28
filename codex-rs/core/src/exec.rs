@@ -14,7 +14,6 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::BufReader;
 use tokio::process::Child;
-use tokio_util::sync::CancellationToken;
 
 use crate::error::CodexErr;
 use crate::error::Result;
@@ -87,7 +86,6 @@ pub async fn process_exec_tool_call(
     sandbox_cwd: &Path,
     codex_linux_sandbox_exe: &Option<PathBuf>,
     stdout_stream: Option<StdoutStream>,
-    cancel_token: Option<CancellationToken>,
 ) -> Result<ExecToolCallOutput> {
     let start = Instant::now();
 
@@ -95,15 +93,7 @@ pub async fn process_exec_tool_call(
 
     let raw_output_result: std::result::Result<RawExecToolCallOutput, CodexErr> = match sandbox_type
     {
-        SandboxType::None => {
-            exec(
-                params,
-                sandbox_policy,
-                stdout_stream.clone(),
-                cancel_token.clone(),
-            )
-            .await
-        }
+        SandboxType::None => exec(params, sandbox_policy, stdout_stream.clone()).await,
         SandboxType::MacosSeatbelt => {
             let ExecParams {
                 command,
@@ -120,13 +110,7 @@ pub async fn process_exec_tool_call(
                 env,
             )
             .await?;
-            consume_truncated_output(
-                child,
-                timeout_duration,
-                stdout_stream.clone(),
-                cancel_token.clone(),
-            )
-            .await
+            consume_truncated_output(child, timeout_duration, stdout_stream.clone()).await
         }
         SandboxType::LinuxSeccomp => {
             let ExecParams {
@@ -150,28 +134,21 @@ pub async fn process_exec_tool_call(
             )
             .await?;
 
-            consume_truncated_output(child, timeout_duration, stdout_stream, cancel_token).await
+            consume_truncated_output(child, timeout_duration, stdout_stream).await
         }
     };
     let duration = start.elapsed();
     match raw_output_result {
         Ok(raw_output) => {
-            #[cfg_attr(not(target_family = "unix"), allow(unused_mut))]
-            let mut raw_output = raw_output;
             #[allow(unused_mut)]
             let mut timed_out = raw_output.timed_out;
-            let was_cancelled = raw_output.was_cancelled;
 
             #[cfg(target_family = "unix")]
             {
-                if was_cancelled {
-                    raw_output.exit_status =
-                        synthetic_exit_status((EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE) << 8);
-                }
                 if let Some(signal) = raw_output.exit_status.signal() {
                     if signal == TIMEOUT_CODE {
                         timed_out = true;
-                    } else if !was_cancelled {
+                    } else {
                         return Err(CodexErr::Sandbox(SandboxErr::Signal(signal)));
                     }
                 }
@@ -180,11 +157,6 @@ pub async fn process_exec_tool_call(
             let mut exit_code = raw_output.exit_status.code().unwrap_or(-1);
             if timed_out {
                 exit_code = EXEC_TIMEOUT_EXIT_CODE;
-            } else if was_cancelled {
-                #[cfg(target_family = "unix")]
-                {
-                    exit_code = EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE;
-                }
             }
 
             let stdout = raw_output.stdout.from_utf8_lossy();
@@ -197,7 +169,6 @@ pub async fn process_exec_tool_call(
                 aggregated_output,
                 duration,
                 timed_out,
-                was_cancelled,
             };
 
             if timed_out {
@@ -253,7 +224,6 @@ struct RawExecToolCallOutput {
     pub stderr: StreamOutput<Vec<u8>>,
     pub aggregated_output: StreamOutput<Vec<u8>>,
     pub timed_out: bool,
-    pub was_cancelled: bool,
 }
 
 impl StreamOutput<String> {
@@ -287,14 +257,12 @@ pub struct ExecToolCallOutput {
     pub aggregated_output: StreamOutput<String>,
     pub duration: Duration,
     pub timed_out: bool,
-    pub was_cancelled: bool,
 }
 
 async fn exec(
     params: ExecParams,
     sandbox_policy: &SandboxPolicy,
     stdout_stream: Option<StdoutStream>,
-    cancel_token: Option<CancellationToken>,
 ) -> Result<RawExecToolCallOutput> {
     let timeout = params.timeout_duration();
     let ExecParams {
@@ -318,7 +286,7 @@ async fn exec(
         env,
     )
     .await?;
-    consume_truncated_output(child, timeout, stdout_stream, cancel_token).await
+    consume_truncated_output(child, timeout, stdout_stream).await
 }
 
 /// Consumes the output of a child process, truncating it so it is suitable for
@@ -327,7 +295,6 @@ async fn consume_truncated_output(
     mut child: Child,
     timeout: Duration,
     stdout_stream: Option<StdoutStream>,
-    cancel_token: Option<CancellationToken>,
 ) -> Result<RawExecToolCallOutput> {
     // Both stdout and stderr were configured with `Stdio::piped()`
     // above, therefore `take()` should normally return `Some`.  If it doesn't
@@ -359,49 +326,24 @@ async fn consume_truncated_output(
         Some(agg_tx.clone()),
     ));
 
-    let mut was_cancelled = false;
-    let (exit_status, timed_out) = if let Some(cancel_token) = cancel_token {
-        tokio::select! {
-            result = tokio::time::timeout(timeout, child.wait()) => {
-                match result {
-                    Ok(status_result) => {
-                        let exit_status = status_result?;
-                        (exit_status, false)
-                    }
-                    Err(_) => {
-                        start_kill_best_effort(&mut child)?;
-                        (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + TIMEOUT_CODE), true)
-                    }
+    let (exit_status, timed_out) = tokio::select! {
+        result = tokio::time::timeout(timeout, child.wait()) => {
+            match result {
+                Ok(status_result) => {
+                    let exit_status = status_result?;
+                    (exit_status, false)
                 }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                start_kill_best_effort(&mut child)?;
-                (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE), false)
-            }
-            _ = cancel_token.cancelled() => {
-                was_cancelled = true;
-                start_kill_best_effort(&mut child)?;
-                (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE), false)
+                Err(_) => {
+                    // timeout
+                    child.start_kill()?;
+                    // Debatable whether `child.wait().await` should be called here.
+                    (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + TIMEOUT_CODE), true)
+                }
             }
         }
-    } else {
-        tokio::select! {
-            result = tokio::time::timeout(timeout, child.wait()) => {
-                match result {
-                    Ok(status_result) => {
-                        let exit_status = status_result?;
-                        (exit_status, false)
-                    }
-                    Err(_) => {
-                        start_kill_best_effort(&mut child)?;
-                        (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + TIMEOUT_CODE), true)
-                    }
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                start_kill_best_effort(&mut child)?;
-                (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE), false)
-            }
+        _ = tokio::signal::ctrl_c() => {
+            child.start_kill()?;
+            (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE), false)
         }
     };
 
@@ -425,16 +367,7 @@ async fn consume_truncated_output(
         stderr,
         aggregated_output,
         timed_out,
-        was_cancelled,
     })
-}
-
-fn start_kill_best_effort(child: &mut Child) -> Result<()> {
-    match child.start_kill() {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(()),
-        Err(e) => Err(CodexErr::Io(e)),
-    }
 }
 
 async fn read_capped<R: AsyncRead + Unpin + Send + 'static>(

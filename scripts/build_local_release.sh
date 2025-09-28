@@ -120,7 +120,8 @@ print_info "Checking Rust toolchain..."
 rustup show active-toolchain
 
 # Force rebuild by touching source files
-
+print_info "Ensuring fresh build..."
+find . -name "*.rs" -exec touch {} + 2>/dev/null || true
 
 # Build the release
 if [[ -n "$TARGET" ]]; then

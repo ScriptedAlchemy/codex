@@ -68,8 +68,6 @@ pub(crate) struct BottomPane {
     status: Option<StatusIndicatorWidget>,
     /// Queued user messages to show under the status indicator.
     queued_user_messages: Vec<String>,
-    /// Additional status messages (e.g. subagent progress) displayed above queued items.
-    status_messages: Vec<String>,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -101,7 +99,6 @@ impl BottomPane {
             ctrl_c_quit_hint: false,
             status: None,
             queued_user_messages: Vec::new(),
-            status_messages: Vec::new(),
             esc_backtrack_hint: false,
         }
     }
@@ -274,9 +271,6 @@ impl BottomPane {
     /// status indicator (defaults to "Working"). No-ops if the status
     /// indicator is not active.
     pub(crate) fn update_status_header(&mut self, header: String) {
-        if self.status.is_none() {
-            self.ensure_status_visible();
-        }
         if let Some(status) = self.status.as_mut() {
             status.update_header(header);
             self.request_redraw();
@@ -325,14 +319,19 @@ impl BottomPane {
         self.composer.set_task_running(running);
 
         if running {
-            self.ensure_status_visible();
-            self.update_status_lines();
+            if self.status.is_none() {
+                self.status = Some(StatusIndicatorWidget::new(
+                    self.app_event_tx.clone(),
+                    self.frame_requester.clone(),
+                ));
+            }
+            if let Some(status) = self.status.as_mut() {
+                status.set_queued_messages(self.queued_user_messages.clone());
+            }
             self.request_redraw();
         } else {
             // Hide the status indicator when a task completes, but keep other modal views.
-            if self.status_messages.is_empty() {
-                self.status = None;
-            }
+            self.status = None;
         }
     }
 
@@ -344,52 +343,11 @@ impl BottomPane {
 
     /// Update the queued messages shown under the status header.
     pub(crate) fn set_queued_user_messages(&mut self, queued: Vec<String>) {
-        self.queued_user_messages = queued;
-        self.update_status_lines();
-        self.request_redraw();
-    }
-
-    pub(crate) fn set_status_messages(&mut self, messages: Vec<String>) {
-        self.status_messages = messages;
-        self.update_status_lines();
-        if !self.status_messages.is_empty() {
-            self.ensure_status_visible();
-            self.request_redraw();
-        } else if !self.is_task_running {
-            self.status = None;
-            self.request_redraw();
-        }
-    }
-
-    pub(crate) fn clear_status_if_idle(&mut self) {
-        if !self.is_task_running && self.status_messages.is_empty() && self.status.is_some() {
-            self.status = None;
-            self.request_redraw();
-        }
-    }
-
-    pub(crate) fn ensure_status_visible(&mut self) {
-        if self.status.is_none() {
-            self.status = Some(StatusIndicatorWidget::new(
-                self.app_event_tx.clone(),
-                self.frame_requester.clone(),
-            ));
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn status_header(&self) -> Option<&str> {
-        self.status.as_ref().map(StatusIndicatorWidget::header)
-    }
-
-    fn update_status_lines(&mut self) {
+        self.queued_user_messages = queued.clone();
         if let Some(status) = self.status.as_mut() {
-            let mut lines = self.status_messages.clone();
-            if !self.queued_user_messages.is_empty() {
-                lines.extend(self.queued_user_messages.clone());
-            }
-            status.set_queued_messages(lines);
+            status.set_queued_messages(queued);
         }
+        self.request_redraw();
     }
 
     /// Update custom prompts available for the slash popup.

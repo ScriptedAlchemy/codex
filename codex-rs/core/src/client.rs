@@ -409,10 +409,6 @@ impl ModelClient {
         self.config.model_family.clone()
     }
 
-    pub fn config(&self) -> Arc<Config> {
-        Arc::clone(&self.config)
-    }
-
     /// Returns the current reasoning effort setting.
     pub fn get_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
         self.effort

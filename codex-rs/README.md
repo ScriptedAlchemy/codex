@@ -193,11 +193,6 @@ resp = client.chat.completions.create(
 )
 ```
 
-### Slash Commands
-
-- `/review` — review staged or working changes in the current workspace.
-- `/review-branch` — review all changes on the current branch compared to its base (PR base, upstream, fork-point to `main`/`master`/`trunk`/`develop`, or sensible fallbacks). Large branches are automatically split into batches with a final consolidation pass.
-
 Notes
 
 - The proxy streams request and response bodies end‑to‑end, so large multipart uploads and SSE streams are supported.

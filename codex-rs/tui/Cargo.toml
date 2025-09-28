@@ -101,7 +101,3 @@ insta = { workspace = true }
 pretty_assertions = { workspace = true }
 rand = { workspace = true }
 vt100 = { workspace = true }
-wiremock = { workspace = true }
-core_test_support = { path = "../core/tests/common" }
-once_cell = { workspace = true }
-uuid = { workspace = true }
