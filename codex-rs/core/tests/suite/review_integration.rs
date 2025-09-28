@@ -5,6 +5,8 @@ use core_test_support::skip_if_no_network;
 use tempfile::TempDir;
 
 use codex_core::CodexAuth;
+use codex_core::auth::read_openai_api_key_from_env;
+use codex_core::auth::OPENAI_API_KEY_ENV_VAR;
 use codex_core::ConversationManager;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
@@ -18,14 +20,22 @@ async fn review_slash_command_flow_no_400_errors() {
     skip_if_no_network!();
 
     // Prefer ChatGPT OAuth token from the user's ~/.codex/auth.json (codex login flow).
-    let chatgpt_auth = dirs::home_dir()
+    // Fall back to OPENAI_API_KEY from the environment. If neither is available,
+    // skip to keep CI green when auth is not configured.
+    let auth = if let Some(a) = dirs::home_dir()
         .map(|mut h| {
             h.push(".codex");
             h
         })
-        .and_then(|p| CodexAuth::from_codex_home(&p).ok().flatten());
-    let Some(auth) = chatgpt_auth else {
-        eprintln!("Skipping review_slash_command_flow_no_400_errors: no chatgpt auth found in ~/.codex/auth.json");
+        .and_then(|p| CodexAuth::from_codex_home(&p).ok().flatten())
+    {
+        a
+    } else if let Some(api_key) = read_openai_api_key_from_env() {
+        CodexAuth::from_api_key(&api_key)
+    } else {
+        eprintln!(
+            "Skipping review_slash_command_flow_no_400_errors: no auth found in ~/.codex/auth.json and {OPENAI_API_KEY_ENV_VAR} not set"
+        );
         return;
     };
 
