@@ -954,7 +954,6 @@ impl Session {
             exec_args.sandbox_cwd,
             exec_args.codex_linux_sandbox_exe,
             exec_args.stdout_stream,
-            exec_args.cancel_token,
         )
         .await;
 
@@ -970,7 +969,6 @@ impl Session {
                     aggregated_output: StreamOutput::new(get_error_message_ui(e)),
                     duration: Duration::default(),
                     timed_out: false,
-                    was_cancelled: false,
                 };
                 &output_stderr
             }
@@ -3498,7 +3496,6 @@ mod tests {
             aggregated_output: StreamOutput::new(full),
             duration: StdDuration::from_secs(1),
             timed_out: false,
-            was_cancelled: false,
         };
 
         let out = format_exec_output_str(&exec);
@@ -3542,7 +3539,6 @@ mod tests {
             aggregated_output: StreamOutput::new(full.clone()),
             duration: StdDuration::from_secs(1),
             timed_out: false,
-            was_cancelled: false,
         };
 
         let out = format_exec_output_str(&exec);
@@ -3574,7 +3570,6 @@ mod tests {
             aggregated_output: StreamOutput::new("Command output".to_string()),
             duration: StdDuration::from_secs(1),
             timed_out: true,
-            was_cancelled: false,
         };
 
         let out = format_exec_output_str(&exec);

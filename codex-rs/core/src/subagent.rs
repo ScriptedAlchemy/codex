@@ -107,7 +107,6 @@ pub(crate) struct SubagentReplyArgs {
     #[serde(default)]
     pub mode: Option<String>, // "blocking" | "nonblocking" (default blocking)
     #[serde(default)]
-    #[allow(dead_code)]
     pub timeout_ms: Option<u64>,
 }
 
@@ -206,7 +205,8 @@ pub(crate) async fn open_subagent(
     );
     let description = summarize_goal(&goal);
 
-    let mut child_config = (*turn_context.client.config()).clone();
+    // Clone the underlying `Config` value (not the `Arc`).
+    let mut child_config = (**turn_context.client.config()).clone();
     // Nested subagents are disabled for now. If enabling them in the future,
     // ensure the parent's current depth would be propagated so the child starts
     // at parent_depth + 1 and respects the global max depth.
@@ -398,11 +398,16 @@ pub(crate) async fn subagent_reply_blocking(
     let mut reply_text: String = String::new();
     let mut last_usage: Option<TokenUsage> = None;
 
+    // Optional hard deadline for the overall wait window.
+    let hard_deadline = args
+        .timeout_ms
+        .map(|ms| Instant::now() + Duration::from_millis(ms));
+
     // Compute dynamic idle budget per next_event call.
     loop {
         let next_event_fut = conversation.next_event();
-        let evt_res = if let Some(max_idle) = max_idle {
-            // Compute remaining idle budget from last_active
+        // Compute time caps: idle cap (max_idle) and hard deadline cap (timeout_ms)
+        let idle_remaining = if let Some(max_idle) = max_idle {
             let (remaining, timed_out) = {
                 let mut sub_map = subagents.lock().await;
                 if let Some(st) = sub_map.get_mut(subagent_id) {
@@ -413,21 +418,38 @@ pub(crate) async fn subagent_reply_blocking(
                         (max_idle - since, false)
                     }
                 } else {
-                    // Subagent not found, consider it expired
                     (Duration::from_millis(0), true)
                 }
             };
-            if timed_out || remaining.is_zero() {
-                // Immediate idle timeout
+            if timed_out {
+                Some(Duration::from_millis(0))
+            } else {
+                Some(remaining)
+            }
+        } else {
+            None
+        };
+        let hard_remaining = hard_deadline.map(|dl| dl.saturating_duration_since(Instant::now()));
+        // Choose the most restrictive remaining duration, if any
+        let (wait_dur_opt, hard_is_min) = match (idle_remaining, hard_remaining) {
+            (Some(a), Some(b)) => (Some(std::cmp::min(a, b)), b <= a),
+            (Some(a), None) => (Some(a), false),
+            (None, Some(b)) => (Some(b), true),
+            (None, None) => (None, false),
+        };
+
+        let evt_res = if let Some(wait_dur) = wait_dur_opt {
+            if wait_dur.is_zero() {
+                // synthetic timeout (cap already exhausted)
                 Err(())
             } else {
-                match tokio::time::timeout(remaining, next_event_fut).await {
+                match tokio::time::timeout(wait_dur, next_event_fut).await {
                     Ok(res) => Ok(res),
                     Err(_) => Err(()),
                 }
             }
         } else {
-            // No idle ceiling; wait normally
+            // No caps; wait normally
             Ok(next_event_fut.await)
         };
 
@@ -477,10 +499,14 @@ pub(crate) async fn subagent_reply_blocking(
                 break;
             }
             Err(()) => {
-                // Idle timeout: interrupt child and note timeout
+                // Timeout: best‑effort cause attribution based on which cap we enforced this loop.
+                let hard_took_precedence = hard_is_min;
                 let _ = conversation.submit(crate::protocol::Op::Interrupt).await;
-                reply_text = "Subagent timed out due to inactivity".to_string();
-                // Also enqueue a background notification below.
+                reply_text = if hard_took_precedence {
+                    "Subagent reply timed out".to_string()
+                } else {
+                    "Subagent timed out due to inactivity".to_string()
+                };
                 break;
             }
         }
