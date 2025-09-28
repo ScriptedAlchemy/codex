@@ -109,6 +109,16 @@ impl StatusIndicatorWidget {
         self.frame_requester.schedule_frame();
     }
 
+    /// True if there are any message lines currently queued for display.
+    pub(crate) fn has_queued_messages(&self) -> bool {
+        !self.queued_messages.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn header(&self) -> &str {
+        &self.header
+    }
+
     pub(crate) fn pause_timer(&mut self) {
         self.pause_timer_at(Instant::now());
     }
