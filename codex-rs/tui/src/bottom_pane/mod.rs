@@ -271,10 +271,19 @@ impl BottomPane {
     /// status indicator (defaults to "Working"). No-ops if the status
     /// indicator is not active.
     pub(crate) fn update_status_header(&mut self, header: String) {
+        if self.status.is_none() {
+            self.status = Some(StatusIndicatorWidget::new(
+                self.app_event_tx.clone(),
+                self.frame_requester.clone(),
+            ));
+            if let Some(status) = self.status.as_mut() {
+                status.set_queued_messages(self.queued_user_messages.clone());
+            }
+        }
         if let Some(status) = self.status.as_mut() {
             status.update_header(header);
-            self.request_redraw();
         }
+        self.request_redraw();
     }
 
     pub(crate) fn show_ctrl_c_quit_hint(&mut self) {
@@ -330,8 +339,56 @@ impl BottomPane {
             }
             self.request_redraw();
         } else {
-            // Hide the status indicator when a task completes, but keep other modal views.
+            // When a task completes, only hide the inline status indicator if
+            // there is nothing else to show (e.g., no queued user messages or
+            // subagent status lines). This preserves the subagent banner when
+            // children remain active. Defer to the centralized idle check.
+            self.clear_status_if_idle();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_header(&self) -> Option<&str> {
+        self.status.as_ref().map(StatusIndicatorWidget::header)
+    }
+
+    /// Replace the status messages shown above the composer. Creates the
+    /// inline status indicator on-demand so callers can surface progress even
+    /// when `set_task_running(true)` has not been called.
+    pub(crate) fn set_status_messages(&mut self, lines: Vec<String>) {
+        if self.status.is_none() {
+            self.status = Some(StatusIndicatorWidget::new(
+                self.app_event_tx.clone(),
+                self.frame_requester.clone(),
+            ));
+        }
+        if let Some(status) = self.status.as_mut() {
+            // Merge the real queued user messages with any incoming status lines
+            // for display in the widget without mutating the underlying queue.
+            let mut combined = self.queued_user_messages.clone();
+            combined.extend(lines);
+            status.set_queued_messages(combined);
+        }
+        self.request_redraw();
+    }
+
+    /// Hide the inline status indicator if there is no running task and there
+    /// is nothing left to show. This considers both queued user messages and
+    /// any extra status lines previously set on the status widget (e.g.,
+    /// subagent progress lines).
+    pub(crate) fn clear_status_if_idle(&mut self) {
+        let has_widget_messages = self
+            .status
+            .as_ref()
+            .map(super::status_indicator_widget::StatusIndicatorWidget::has_queued_messages)
+            .unwrap_or(false);
+        if !self.is_task_running
+            && self.status.is_some()
+            && self.queued_user_messages.is_empty()
+            && !has_widget_messages
+        {
             self.status = None;
+            self.request_redraw();
         }
     }
 

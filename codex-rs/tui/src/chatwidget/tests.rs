@@ -295,7 +295,7 @@ async fn helpers_are_available_and_do_not_panic() {
 }
 
 // --- Helpers for tests that need direct construction and event draining ---
-fn make_chatwidget_manual() -> (
+pub(super) fn make_chatwidget_manual() -> (
     ChatWidget,
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
@@ -340,6 +340,10 @@ fn make_chatwidget_manual() -> (
         pending_notification: None,
         is_review_mode: false,
         review_orchestrator: None,
+        focused_subagent: None,
+        subagents: std::collections::BTreeMap::new(),
+        subagent_tasks: std::collections::BTreeSet::new(),
+        subagent_status_messages: std::collections::BTreeMap::new(),
         ghost_snapshots: Vec::new(),
         ghost_snapshots_disabled: false,
     };
@@ -357,7 +361,7 @@ pub(crate) fn make_chatwidget_manual_with_sender() -> (
     (widget, app_event_tx, rx, op_rx)
 }
 
-fn drain_insert_history(
+pub(super) fn drain_insert_history(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
 ) -> Vec<Vec<ratatui::text::Line<'static>>> {
     let mut out = Vec::new();

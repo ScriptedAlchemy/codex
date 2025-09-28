@@ -225,6 +225,12 @@ async fn prompt_tools_are_consistent_across_requests() {
         "run_pr_checks",
         "apply_patch",
         "view_image",
+        // Subagent tool suite is enabled by default for the main agent.
+        "subagent_open",
+        "subagent_reply",
+        "subagent_mailbox",
+        "subagent_read",
+        "subagent_end",
     ];
     let body0 = requests[0].body_json::<serde_json::Value>().unwrap();
     assert_eq!(

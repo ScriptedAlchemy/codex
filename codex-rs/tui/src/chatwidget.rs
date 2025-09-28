@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::Path;
@@ -276,7 +278,13 @@ pub(crate) struct ChatWidget {
     pending_notification: Option<Notification>,
     // Simple review mode flag; used to adjust layout and banners.
     is_review_mode: bool,
+    // Orchestrator for /review-branch multi-batch final-pass flow
     review_orchestrator: Option<Orchestrator>,
+    // Subagent focus and registry
+    focused_subagent: Option<String>,
+    subagents: BTreeMap<String, String>, // id -> description
+    subagent_tasks: BTreeSet<String>,
+    subagent_status_messages: BTreeMap<String, String>,
     // List of ghost commits corresponding to each turn.
     ghost_snapshots: Vec<GhostCommit>,
     ghost_snapshots_disabled: bool,
@@ -389,6 +397,87 @@ impl ChatWidget {
         self.full_reasoning_buffer.push_str(&self.reasoning_buffer);
         self.full_reasoning_buffer.push_str("\n\n");
         self.reasoning_buffer.clear();
+    }
+
+    fn handle_task_started(&mut self, source_id: Option<&str>) {
+        if let Some(id) = source_id
+            && self.subagents.contains_key(id)
+        {
+            self.subagent_tasks.insert(id.to_string());
+            let default = self
+                .subagents
+                .get(id)
+                .map(|desc| format!("Subagent {id}: {desc}"))
+                .unwrap_or_else(|| format!("Subagent {id}: running"));
+            self.subagent_status_messages
+                .entry(id.to_string())
+                .or_insert(default);
+            self.update_subagent_status_panel();
+            return;
+        }
+        self.on_task_started();
+    }
+
+    fn handle_task_complete(
+        &mut self,
+        source_id: Option<&str>,
+        last_agent_message: Option<String>,
+    ) {
+        if let Some(id) = source_id
+            && self.subagents.contains_key(id)
+        {
+            self.subagent_tasks.remove(id);
+            self.subagent_status_messages.remove(id);
+            self.update_subagent_status_panel();
+            return;
+        }
+        self.on_task_complete(last_agent_message);
+    }
+
+    fn handle_turn_aborted(&mut self, source_id: Option<&str>, reason: TurnAbortReason) {
+        if let Some(id) = source_id
+            && self.subagents.contains_key(id)
+        {
+            self.subagent_tasks.remove(id);
+            self.subagent_status_messages
+                .insert(id.to_string(), format!("Subagent {id}: interrupted"));
+            self.update_subagent_status_panel();
+            return;
+        }
+        match reason {
+            TurnAbortReason::Interrupted | TurnAbortReason::ReviewEnded => {
+                self.on_interrupted_turn(reason)
+            }
+            TurnAbortReason::Replaced => {
+                self.on_error("Turn aborted: replaced by a new task".to_owned())
+            }
+        }
+    }
+
+    fn update_subagent_status_panel(&mut self) {
+        let lines: Vec<String> = self
+            .subagent_tasks
+            .iter()
+            .filter_map(|id| self.subagent_status_messages.get(id))
+            .cloned()
+            .collect();
+
+        if self.bottom_pane.is_task_running() {
+            if !lines.is_empty() {
+                self.bottom_pane.set_status_messages(lines);
+            } else {
+                self.bottom_pane.set_status_messages(Vec::new());
+            }
+            return;
+        }
+
+        if let Some(first) = lines.first() {
+            self.bottom_pane.update_status_header(first.clone());
+            self.bottom_pane.set_status_messages(lines);
+        } else {
+            self.bottom_pane.set_status_messages(Vec::new());
+            self.bottom_pane.clear_status_if_idle();
+        }
     }
 
     // Raw reasoning uses the same flow as summarized reasoning
@@ -615,6 +704,33 @@ impl ChatWidget {
 
     fn on_background_event(&mut self, message: String) {
         debug!("BackgroundEvent: {message}");
+        // Surface subagent lifecycle events and track active set.
+        if let Some(stripped) = message.strip_prefix("Subagent ") {
+            if let Some((id, rest)) = stripped.split_once(' ') {
+                if rest.starts_with("opened:") {
+                    let desc = rest.trim_start_matches("opened:").trim().to_string();
+                    self.subagents.insert(id.to_string(), desc.clone());
+                    self.subagent_status_messages
+                        .insert(id.to_string(), format!("Subagent {id}: {desc}"));
+                    self.update_subagent_status_panel();
+                } else if rest.starts_with("ended") {
+                    self.subagents.remove(id);
+                    if self.focused_subagent.as_deref() == Some(id) {
+                        self.focused_subagent = None;
+                    }
+                    self.subagent_tasks.remove(id);
+                    self.subagent_status_messages.remove(id);
+                    self.update_subagent_status_panel();
+                } else if rest.starts_with("progress:") {
+                    let progress = rest.trim_start_matches("progress:").trim().to_string();
+                    self.subagent_status_messages
+                        .insert(id.to_string(), format!("Subagent {id}: {progress}"));
+                    self.update_subagent_status_panel();
+                }
+            }
+            self.add_to_history(history_cell::new_subagent_event(message));
+            self.request_redraw();
+        }
     }
 
     fn on_stream_error(&mut self, message: String) {
@@ -928,6 +1044,10 @@ impl ChatWidget {
             pending_notification: None,
             is_review_mode: false,
             review_orchestrator: None,
+            focused_subagent: None,
+            subagents: BTreeMap::new(),
+            subagent_tasks: BTreeSet::new(),
+            subagent_status_messages: BTreeMap::new(),
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
         }
@@ -991,6 +1111,10 @@ impl ChatWidget {
             pending_notification: None,
             is_review_mode: false,
             review_orchestrator: None,
+            focused_subagent: None,
+            subagents: BTreeMap::new(),
+            subagent_tasks: BTreeSet::new(),
+            subagent_status_messages: BTreeMap::new(),
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
         }
@@ -1013,6 +1137,15 @@ impl ChatWidget {
                 ..
             } => {
                 self.on_ctrl_c();
+                return;
+            }
+            KeyEvent {
+                code: KeyCode::Char('o'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                self.cycle_subagent_focus();
                 return;
             }
             KeyEvent {
@@ -1049,15 +1182,19 @@ impl ChatWidget {
             _ => {
                 match self.bottom_pane.handle_key_event(key_event) {
                     InputResult::Submitted(text) => {
-                        // If a task is running, queue the user input to be sent after the turn completes.
+                        // When a subagent is focused, allow sending messages to it even while
+                        // the parent turn is running. This keeps subagent chats responsive and
+                        // avoids blocking the main chat while subagent opens/replies proceed.
                         let user_message = UserMessage {
                             text,
                             image_paths: self.bottom_pane.take_recent_submission_images(),
                         };
-                        if self.bottom_pane.is_task_running() {
+                        if self.bottom_pane.is_task_running() && self.focused_subagent.is_none() {
+                            // Parent focused: queue until the current turn completes.
                             self.queued_user_messages.push_back(user_message);
                             self.refresh_queued_user_messages();
                         } else {
+                            // Either no task is running, or a subagent is focused: send now.
                             self.submit_user_message(user_message);
                         }
                     }
@@ -1068,6 +1205,24 @@ impl ChatWidget {
                 }
             }
         }
+    }
+
+    fn cycle_subagent_focus(&mut self) {
+        // Ordered list: parent (None) + active subagent ids sorted
+        let mut ids: Vec<Option<String>> = vec![None];
+        ids.extend(self.subagents.keys().cloned().map(Some));
+        let cur_idx = ids
+            .iter()
+            .position(|v| v.as_ref() == self.focused_subagent.as_ref())
+            .unwrap_or(0);
+        let next_idx = (cur_idx + 1) % ids.len().max(1);
+        self.focused_subagent = ids[next_idx].clone();
+        let banner = match self.focused_subagent.as_deref() {
+            Some(id) => format!("Focus: subagent {id}"),
+            None => "Focus: parent".to_string(),
+        };
+        self.add_to_history(history_cell::new_subagent_event(banner));
+        self.request_redraw();
     }
 
     pub(crate) fn attach_image(
@@ -1252,15 +1407,47 @@ impl ChatWidget {
             items.push(InputItem::Text { text: text.clone() });
         }
 
-        for path in image_paths {
-            items.push(InputItem::LocalImage { path });
+        for path in &image_paths {
+            items.push(InputItem::LocalImage {
+                path: path.to_path_buf(),
+            });
         }
 
-        self.codex_op_tx
-            .send(Op::UserInput { items })
-            .unwrap_or_else(|e| {
-                tracing::error!("failed to send message: {e}");
-            });
+        if items.is_empty() {
+            return;
+        }
+
+        if let Some(sub_id) = self.focused_subagent.clone() {
+            self.codex_op_tx
+                .send(Op::SubagentDirectMessage {
+                    subagent_id: sub_id.clone(),
+                    message: text.clone(),
+                    images: if image_paths.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            image_paths
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect(),
+                        )
+                    },
+                    mode: Some("blocking".to_string()),
+                    timeout_ms: None,
+                })
+                .unwrap_or_else(|e| tracing::error!("failed to send subagent message: {e}"));
+            if !text.is_empty() {
+                self.add_to_history(history_cell::new_subagent_event(format!(
+                    "To subagent {sub_id}: {text}"
+                )));
+            }
+        } else {
+            self.codex_op_tx
+                .send(Op::UserInput { items })
+                .unwrap_or_else(|e| {
+                    tracing::error!("failed to send message: {e}");
+                });
+        }
 
         // Persist the text to cross-session message history.
         if !text.is_empty() {
@@ -1272,7 +1459,7 @@ impl ChatWidget {
         }
 
         // Only show the text portion in conversation history.
-        if !text.is_empty() {
+        if !text.is_empty() && self.focused_subagent.is_none() {
             self.add_to_history(history_cell::new_user_prompt(text));
         }
     }
@@ -1379,26 +1566,18 @@ impl ChatWidget {
                 self.on_agent_reasoning_final()
             }
             EventMsg::AgentReasoningSectionBreak(_) => self.on_reasoning_section_break(),
-            EventMsg::TaskStarted(_) => self.on_task_started(),
+            EventMsg::TaskStarted(_) => self.handle_task_started(id.as_deref()),
             EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {
-                self.on_task_complete(last_agent_message)
+                self.handle_task_complete(id.as_deref(), last_agent_message)
             }
             EventMsg::TokenCount(ev) => {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
             }
             EventMsg::Error(ErrorEvent { message }) => self.on_error(message),
-            EventMsg::TurnAborted(ev) => match ev.reason {
-                TurnAbortReason::Interrupted => {
-                    self.on_interrupted_turn(ev.reason);
-                }
-                TurnAbortReason::Replaced => {
-                    self.on_error("Turn aborted: replaced by a new task".to_owned())
-                }
-                TurnAbortReason::ReviewEnded => {
-                    self.on_interrupted_turn(ev.reason);
-                }
-            },
+            EventMsg::TurnAborted(ev) => {
+                self.handle_turn_aborted(id.as_deref(), ev.reason);
+            }
             EventMsg::PlanUpdate(update) => self.on_plan_update(update),
             EventMsg::ExecApprovalRequest(ev) => {
                 // For replayed events, synthesize an empty id (these should not occur).
@@ -2421,3 +2600,6 @@ pub(crate) fn show_review_commit_picker_with_entries(
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+pub(crate) mod tests_subagent;

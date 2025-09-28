@@ -7,6 +7,8 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use crate::AuthManager;
+#[cfg(test)]
+use crate::CodexAuth;
 use crate::client_common::REVIEW_PROMPT;
 use crate::event_mapping::map_response_item_to_event_messages;
 use crate::function_tool::FunctionCallError;
@@ -32,12 +34,27 @@ use serde::Serialize;
 use serde_json;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
+
+// Subagent logic and types live in `subagent.rs`.
+use crate::subagent::DEFAULT_MAX_SUBAGENT_CONCURRENT;
+use crate::subagent::DEFAULT_MAX_SUBAGENT_DEPTH;
+use crate::subagent::Mailbox;
+use crate::subagent::SubagentEndArgs;
+use crate::subagent::SubagentMailboxArgs;
+use crate::subagent::SubagentOpenArgs;
+use crate::subagent::SubagentOpenResult;
+use crate::subagent::SubagentReadArgs;
+use crate::subagent::SubagentReplyArgs;
+use crate::subagent::SubagentSettings;
+use crate::subagent::SubagentState;
 
 use crate::ModelProviderInfo;
 use crate::apply_patch;
@@ -139,6 +156,9 @@ use codex_protocol::protocol::InitialHistory;
 pub mod compact;
 use self::compact::build_compacted_history;
 use self::compact::collect_user_messages;
+
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 /// The high-level interface to the Codex system.
 /// It operates as a queue pair where you send submissions and receive events.
@@ -265,6 +285,11 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     services: SessionServices,
     next_internal_sub_id: AtomicU64,
+    auth_manager: Arc<AuthManager>,
+    subagents: Mutex<HashMap<String, SubagentState>>,
+    mailbox: Mutex<Mailbox>,
+    subagent_slots: Arc<Semaphore>,
+    subagent_settings: SubagentSettings,
 }
 
 /// The context needed for a single turn of the conversation.
@@ -441,6 +466,7 @@ impl Session {
                 include_web_search_request: config.tools_web_search_request,
                 use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
                 include_view_image_tool: config.include_view_image_tool,
+                include_subagent_tool: config.include_subagent_tool,
                 experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
             }),
             user_instructions,
@@ -470,6 +496,14 @@ impl Session {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            auth_manager,
+            subagents: Mutex::new(HashMap::new()),
+            mailbox: Mutex::new(Mailbox::default()),
+            subagent_slots: Arc::new(Semaphore::new(DEFAULT_MAX_SUBAGENT_CONCURRENT)),
+            subagent_settings: SubagentSettings {
+                max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
+                _max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
+            },
         });
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
@@ -849,7 +883,7 @@ impl Session {
             aggregated_output,
             duration,
             exit_code,
-            timed_out: _,
+            ..
         } = output;
         // Send full stdout/stderr to clients; do not truncate.
         let stdout = stdout.text.clone();
@@ -962,6 +996,59 @@ impl Session {
             }),
         };
         self.send_event(event).await;
+    }
+
+    async fn open_subagent(
+        &self,
+        turn_context: &TurnContext,
+        args: SubagentOpenArgs,
+    ) -> Result<SubagentOpenResult, String> {
+        crate::subagent::open_subagent(
+            Arc::clone(&self.auth_manager),
+            &self.next_internal_sub_id,
+            Arc::clone(&self.subagent_slots),
+            self.subagent_settings,
+            &self.subagents,
+            turn_context,
+            args,
+        )
+        .await
+    }
+
+    async fn subagent_reply_blocking(
+        &self,
+        args: &SubagentReplyArgs,
+    ) -> Result<serde_json::Value, String> {
+        let description = {
+            let subs = self.subagents.lock().await;
+            subs.get(&args.subagent_id).map(|s| s.description.clone())
+        };
+
+        let result =
+            crate::subagent::subagent_reply_blocking(&self.subagents, &self.mailbox, args).await;
+
+        if result.is_ok()
+            && let Some(desc) = description
+        {
+            self.notify_background_event(
+                &args.subagent_id,
+                format!("Subagent {} replied: {}", args.subagent_id, desc),
+            )
+            .await;
+        }
+        result
+    }
+
+    async fn list_mailbox(&self, filter: SubagentMailboxArgs) -> serde_json::Value {
+        crate::subagent::list_mailbox(&self.mailbox, filter).await
+    }
+
+    async fn read_mail(&self, args: SubagentReadArgs) -> Result<serde_json::Value, String> {
+        crate::subagent::read_mail(&self.mailbox, args).await
+    }
+
+    async fn end_subagent(&self, args: SubagentEndArgs) -> Result<serde_json::Value, String> {
+        crate::subagent::end_subagent(&self.subagents, args).await
     }
 
     async fn notify_stream_error(&self, sub_id: &str, message: impl Into<String>) {
@@ -1144,6 +1231,7 @@ async fn submission_loop(
                     include_web_search_request: config.tools_web_search_request,
                     use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
                     include_view_image_tool: config.include_view_image_tool,
+                    include_subagent_tool: config.include_subagent_tool,
                     experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
                 });
 
@@ -1232,6 +1320,7 @@ async fn submission_loop(
                             use_streamable_shell_tool: config
                                 .use_experimental_streamable_shell_tool,
                             include_view_image_tool: config.include_view_image_tool,
+                            include_subagent_tool: config.include_subagent_tool,
                             experimental_unified_exec_tool: config
                                 .use_experimental_unified_exec_tool,
                         }),
@@ -1453,6 +1542,7 @@ async fn spawn_review_thread(
         include_web_search_request: false,
         use_streamable_shell_tool: false,
         include_view_image_tool: false,
+        include_subagent_tool: false,
         experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
     });
 
@@ -1613,7 +1703,7 @@ pub(crate) async fn run_task(
             })
             .collect();
         match run_turn(
-            &sess,
+            Arc::clone(&sess),
             turn_context.as_ref(),
             &mut turn_diff_tracker,
             sub_id.clone(),
@@ -1671,11 +1761,11 @@ pub(crate) async fn run_task(
                         }
                         (
                             ResponseItem::CustomToolCall { .. },
-                            Some(ResponseInputItem::CustomToolCallOutput { call_id, output }),
+                            Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
                         ) => {
                             items_to_record_in_conversation_history.push(item);
                             items_to_record_in_conversation_history.push(
-                                ResponseItem::CustomToolCallOutput {
+                                ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
                                     output: output.clone(),
                                 },
@@ -1838,7 +1928,7 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
 }
 
 async fn run_turn(
-    sess: &Session,
+    sess: Arc<Session>,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: String,
@@ -1858,7 +1948,15 @@ async fn run_turn(
 
     let mut retries = 0;
     loop {
-        match try_run_turn(sess, turn_context, turn_diff_tracker, &sub_id, &prompt).await {
+        match try_run_turn(
+            Arc::clone(&sess),
+            turn_context,
+            turn_diff_tracker,
+            &sub_id,
+            &prompt,
+        )
+        .await
+        {
             Ok(output) => return Ok(output),
             Err(CodexErr::Interrupted) => return Err(CodexErr::Interrupted),
             Err(CodexErr::EnvVar(var)) => return Err(CodexErr::EnvVar(var)),
@@ -1920,7 +2018,7 @@ struct TurnRunResult {
 }
 
 async fn try_run_turn(
-    sess: &Session,
+    sess: Arc<Session>,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: &str,
@@ -1964,9 +2062,12 @@ async fn try_run_turn(
                     Some(call_id.clone())
                 }
             })
-            .map(|call_id| ResponseItem::CustomToolCallOutput {
+            .map(|call_id| ResponseItem::FunctionCallOutput {
                 call_id,
-                output: "aborted".to_string(),
+                output: FunctionCallOutputPayload {
+                    content: "aborted".to_string(),
+                    success: Some(false),
+                },
             })
             .collect::<Vec<_>>()
     };
@@ -2021,7 +2122,7 @@ async fn try_run_turn(
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(item) => {
                 let response = handle_response_item(
-                    sess,
+                    Arc::clone(&sess),
                     turn_context,
                     turn_diff_tracker,
                     sub_id,
@@ -2111,13 +2212,14 @@ async fn try_run_turn(
 }
 
 async fn handle_response_item(
-    sess: &Session,
+    sess: Arc<Session>,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: &str,
     item: ResponseItem,
 ) -> CodexResult<Option<ResponseInputItem>> {
     debug!(?item, "Output item");
+    let sess_ref = sess.as_ref();
     let output = match item {
         ResponseItem::FunctionCall {
             name,
@@ -2126,11 +2228,13 @@ async fn handle_response_item(
             ..
         } => {
             info!("FunctionCall: {name}({arguments})");
-            if let Some((server, tool_name)) =
-                sess.services.mcp_connection_manager.parse_tool_name(&name)
+            if let Some((server, tool_name)) = sess_ref
+                .services
+                .mcp_connection_manager
+                .parse_tool_name(&name)
             {
                 let resp = handle_mcp_tool_call(
-                    sess,
+                    sess_ref,
                     sub_id,
                     call_id.clone(),
                     server,
@@ -2141,7 +2245,7 @@ async fn handle_response_item(
                 Some(resp)
             } else {
                 let result = handle_function_call(
-                    sess,
+                    sess_ref,
                     turn_context,
                     turn_diff_tracker,
                     sub_id.to_string(),
@@ -2198,7 +2302,7 @@ async fn handle_response_item(
             {
                 let result = handle_container_exec_with_params(
                     exec_params,
-                    sess,
+                    sess_ref,
                     turn_context,
                     turn_diff_tracker,
                     sub_id.to_string(),
@@ -2230,7 +2334,7 @@ async fn handle_response_item(
             status: _,
         } => {
             let result = handle_custom_tool_call(
-                sess,
+                Arc::clone(&sess),
                 turn_context,
                 turn_diff_tracker,
                 sub_id.to_string(),
@@ -2240,11 +2344,14 @@ async fn handle_response_item(
             )
             .await;
 
-            let output = match result {
-                Ok(content) => content,
-                Err(FunctionCallError::RespondToModel(msg)) => msg,
+            let (content, success) = match result {
+                Ok(content) => (content, Some(true)),
+                Err(FunctionCallError::RespondToModel(msg)) => (msg, Some(false)),
             };
-            Some(ResponseInputItem::CustomToolCallOutput { call_id, output })
+            Some(ResponseInputItem::FunctionCallOutput {
+                call_id,
+                output: FunctionCallOutputPayload { content, success },
+            })
         }
         ResponseItem::FunctionCallOutput { .. } => {
             debug!("unexpected FunctionCallOutput from stream");
@@ -2264,14 +2371,16 @@ async fn handle_response_item(
                     trace!("suppressing assistant Message in review mode");
                     Vec::new()
                 }
-                _ => map_response_item_to_event_messages(&item, sess.show_raw_agent_reasoning()),
+                _ => {
+                    map_response_item_to_event_messages(&item, sess_ref.show_raw_agent_reasoning())
+                }
             };
             for msg in msgs {
                 let event = Event {
                     id: sub_id.to_string(),
                     msg,
                 };
-                sess.send_event(event).await;
+                sess_ref.send_event(event).await;
             }
             None
         }
@@ -2494,7 +2603,7 @@ async fn handle_function_call(
 }
 
 async fn handle_custom_tool_call(
-    sess: &Session,
+    sess: Arc<Session>,
     turn_context: &TurnContext,
     turn_diff_tracker: &mut TurnDiffTracker,
     sub_id: String,
@@ -2504,6 +2613,128 @@ async fn handle_custom_tool_call(
 ) -> Result<String, FunctionCallError> {
     info!("CustomToolCall: {name} {input}");
     match name.as_str() {
+        "subagent_open" => {
+            let args = match serde_json::from_str::<SubagentOpenArgs>(&input) {
+                Ok(args) => args,
+                Err(err) => {
+                    return Ok(serde_json::json!({
+                        "error": format!(
+                            "failed to parse subagent_open arguments: {err}"
+                        )
+                    })
+                    .to_string());
+                }
+            };
+
+            match sess.open_subagent(turn_context, args).await {
+                Ok(result) => {
+                    sess.notify_background_event(
+                        &sub_id,
+                        format!(
+                            "Subagent {} opened: {}",
+                            result.subagent_id, result.description
+                        ),
+                    )
+                    .await;
+                    Ok(serde_json::json!({
+                        "subagent_id": result.subagent_id,
+                        "conversation_id": result.conversation_id,
+                        "rollout_path": result.rollout_path,
+                        "description": result.description,
+                    })
+                    .to_string())
+                }
+                Err(err) => Ok(serde_json::json!({ "error": err }).to_string()),
+            }
+        }
+        "subagent_reply" => {
+            let args = match serde_json::from_str::<SubagentReplyArgs>(&input) {
+                Ok(args) => args,
+                Err(err) => {
+                    return Ok(serde_json::json!({
+                        "error": format!(
+                            "failed to parse subagent_reply arguments: {err}"
+                        )
+                    })
+                    .to_string());
+                }
+            };
+
+            let mode = args.mode.clone().unwrap_or_else(|| "blocking".to_string());
+            let result = if mode.eq_ignore_ascii_case("nonblocking") {
+                let sess_clone = Arc::clone(&sess);
+                tokio::spawn(async move {
+                    let _ = sess_clone.subagent_reply_blocking(&args).await;
+                });
+                Ok(serde_json::json!({ "accepted": true }))
+            } else {
+                sess.subagent_reply_blocking(&args).await
+            };
+
+            match result {
+                Ok(val) => Ok(val.to_string()),
+                Err(err) => Ok(serde_json::json!({ "error": err }).to_string()),
+            }
+        }
+        "subagent_mailbox" => {
+            let args = match serde_json::from_str::<SubagentMailboxArgs>(&input) {
+                Ok(args) => args,
+                Err(err) => {
+                    return Ok(serde_json::json!({
+                        "error": format!(
+                            "failed to parse subagent_mailbox arguments: {err}"
+                        )
+                    })
+                    .to_string());
+                }
+            };
+
+            let out = sess.list_mailbox(args).await;
+            Ok(out.to_string())
+        }
+        "subagent_read" => {
+            let args = match serde_json::from_str::<SubagentReadArgs>(&input) {
+                Ok(args) => args,
+                Err(err) => {
+                    return Ok(serde_json::json!({
+                        "error": format!(
+                            "failed to parse subagent_read arguments: {err}"
+                        )
+                    })
+                    .to_string());
+                }
+            };
+
+            match sess.read_mail(args).await {
+                Ok(val) => Ok(val.to_string()),
+                Err(err) => Ok(serde_json::json!({ "error": err }).to_string()),
+            }
+        }
+        "subagent_end" => {
+            let args = match serde_json::from_str::<SubagentEndArgs>(&input) {
+                Ok(args) => args,
+                Err(err) => {
+                    return Ok(serde_json::json!({
+                        "error": format!(
+                            "failed to parse subagent_end arguments: {err}"
+                        )
+                    })
+                    .to_string());
+                }
+            };
+            let subagent_id_for_msg = args.subagent_id.clone();
+            match sess.end_subagent(args).await {
+                Ok(val) => {
+                    sess.notify_background_event(
+                        &sub_id,
+                        format!("Subagent {subagent_id_for_msg} ended"),
+                    )
+                    .await;
+                    Ok(val.to_string())
+                }
+                Err(err) => Ok(serde_json::json!({ "error": err }).to_string()),
+            }
+        }
         "apply_patch" => {
             let exec_params = ExecParams {
                 command: vec!["apply_patch".to_string(), input.clone()],
@@ -2516,7 +2747,7 @@ async fn handle_custom_tool_call(
 
             handle_container_exec_with_params(
                 exec_params,
-                sess,
+                sess.as_ref(),
                 turn_context,
                 turn_diff_tracker,
                 sub_id,
@@ -2563,6 +2794,7 @@ pub struct ExecInvokeArgs<'a> {
     pub sandbox_cwd: &'a Path,
     pub codex_linux_sandbox_exe: &'a Option<PathBuf>,
     pub stdout_stream: Option<StdoutStream>,
+    pub cancel_token: Option<CancellationToken>,
 }
 
 fn maybe_translate_shell_command(
@@ -2756,6 +2988,7 @@ async fn handle_container_exec_with_params(
                         tx_event: sess.tx_event.clone(),
                     })
                 },
+                cancel_token: None,
             },
         )
         .await;
@@ -2871,6 +3104,7 @@ async fn handle_sandbox_error(
                                 tx_event: sess.tx_event.clone(),
                             })
                         },
+                        cancel_token: None,
                     },
                 )
                 .await;
@@ -3432,6 +3666,7 @@ mod tests {
             include_web_search_request: config.tools_web_search_request,
             use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
             include_view_image_tool: config.include_view_image_tool,
+            include_subagent_tool: config.include_subagent_tool,
             experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
         });
         let turn_context = TurnContext {
@@ -3463,6 +3698,16 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            auth_manager: AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+                "test-api-key",
+            )),
+            subagents: Mutex::new(HashMap::new()),
+            mailbox: Mutex::new(Mailbox::default()),
+            subagent_slots: Arc::new(Semaphore::new(DEFAULT_MAX_SUBAGENT_CONCURRENT)),
+            subagent_settings: SubagentSettings {
+                max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
+                _max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
+            },
         };
         (session, turn_context)
     }
@@ -3499,6 +3744,7 @@ mod tests {
             include_web_search_request: config.tools_web_search_request,
             use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
             include_view_image_tool: config.include_view_image_tool,
+            include_subagent_tool: config.include_subagent_tool,
             experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
         });
         let turn_context = Arc::new(TurnContext {
@@ -3530,6 +3776,16 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            auth_manager: AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+                "test-api-key",
+            )),
+            subagents: Mutex::new(HashMap::new()),
+            mailbox: Mutex::new(Mailbox::default()),
+            subagent_slots: Arc::new(Semaphore::new(DEFAULT_MAX_SUBAGENT_CONCURRENT)),
+            subagent_settings: SubagentSettings {
+                max_depth: DEFAULT_MAX_SUBAGENT_DEPTH,
+                _max_concurrent: DEFAULT_MAX_SUBAGENT_CONCURRENT,
+            },
         });
         (session, turn_context, rx_event)
     }
