@@ -380,7 +380,7 @@ impl BottomPane {
         let has_widget_messages = self
             .status
             .as_ref()
-            .map(|s| s.has_queued_messages())
+            .map(super::status_indicator_widget::StatusIndicatorWidget::has_queued_messages)
             .unwrap_or(false);
         if !self.is_task_running
             && self.status.is_some()
