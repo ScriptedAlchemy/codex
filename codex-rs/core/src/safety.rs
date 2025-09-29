@@ -89,7 +89,7 @@ pub fn assess_command_safety(
 ) -> SafetyCheck {
     // Some commands look dangerous. Even if they are run inside a sandbox,
     // unless the user has explicitly approved them, we should ask,
-    // or reject if the approval policy tells us not to ask.
+    // or reject if the approval_policy tells us not to ask.
     if command_might_be_dangerous(command) && !approved.contains(command) {
         if approval_policy == AskForApproval::Never {
             return SafetyCheck::Reject {

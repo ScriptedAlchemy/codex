@@ -5,17 +5,10 @@ use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
 
 use crate::history_cell::HistoryCell;
-use crate::pr_checks::PrChecksOutcome;
 
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_core::protocol_config_types::ReasoningEffort;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReviewBranchMode {
-    Standard,
-    Deep,
-}
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
@@ -48,9 +41,6 @@ pub(crate) enum AppEvent {
     /// Result of computing a `/diff` command.
     DiffResult(String),
 
-    /// Result of executing `/pr-checks`.
-    PrChecksFinished(PrChecksOutcome),
-
     InsertHistoryCell(Box<dyn HistoryCell>),
 
     StartCommitAnimation,
@@ -79,20 +69,11 @@ pub(crate) enum AppEvent {
     ConversationHistory(ConversationPathResponseEvent),
 
     /// Open the branch picker option from the review popup.
-    OpenReviewBranchPicker {
-        cwd: PathBuf,
-        mode: ReviewBranchMode,
-    },
+    OpenReviewBranchPicker(PathBuf),
 
     /// Open the commit picker option from the review popup.
     OpenReviewCommitPicker(PathBuf),
 
     /// Open the custom prompt option from the review popup.
     OpenReviewCustomPrompt,
-
-    /// Start a branch review (standard or deep) after selecting a base.
-    StartBranchReview {
-        base: String,
-        mode: ReviewBranchMode,
-    },
 }

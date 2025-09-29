@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -57,12 +56,10 @@ use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
-use tracing::error;
-use tracing::warn;
 
 use crate::app_event::AppEvent;
-use crate::app_event::ReviewBranchMode;
 use crate::app_event_sender::AppEventSender;
+use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
@@ -78,24 +75,16 @@ use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::new_active_exec_command;
 use crate::get_git_diff::get_git_diff;
-use crate::git_branch_summary::branch_shortstat;
 use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PatchEventType;
-use crate::history_cell::RateLimitSnapshotDisplay;
 use crate::markdown::append_markdown;
-use crate::pr_checks::PrChecksOutcome;
-use crate::pr_checks::run_pr_checks;
-use crate::review_branch::chunker::ChunkLimits;
-use crate::review_branch::orchestrator::Orchestrator;
-use crate::review_branch::orchestrator::OrchestratorStage;
 use crate::slash_command::SlashCommand;
+use crate::status::RateLimitSnapshotDisplay;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
-// streaming internals are provided by crate::streaming and crate::markdown_stream
-use crate::bottom_pane::ApprovalRequest;
 mod interrupts;
 use self::interrupts::InterruptManager;
 mod agent;
@@ -104,7 +93,8 @@ use self::agent::spawn_agent_from_existing;
 mod session_header;
 use self::session_header::SessionHeader;
 use crate::streaming::controller::StreamController;
-use anyhow::Result as AnyResult;
+use std::path::Path;
+
 use chrono::Local;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
@@ -123,20 +113,6 @@ use codex_git_tooling::create_ghost_commit;
 use codex_git_tooling::restore_ghost_commit;
 
 const MAX_TRACKED_GHOST_COMMITS: usize = 20;
-const REVIEW_BRANCH_PROMPT_TMPL: &str = include_str!("prompt_for_review_branch_command.md");
-const REVIEW_BRANCH_BATCH_PROMPT_TMPL: &str =
-    include_str!("prompt_for_review_branch_batch_command.md");
-const REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL: &str =
-    include_str!("prompt_for_review_branch_consolidation.md");
-const REVIEW_BRANCH_LIMITS: ChunkLimits = ChunkLimits {
-    small_files_cap: 25,
-    large_files_cap: 5,
-    large_file_threshold_lines: 400,
-    max_lines: 5000,
-};
-const PR_CHECKS_OUTPUT_MAX_GRAPHEMES: usize = 4000;
-
-const PR_CHECKS_COMMAND_DISPLAY: &str = "`gh pr checks --watch`";
 
 // Track information about an in-flight exec command.
 struct RunningCommand {
@@ -256,7 +232,6 @@ pub(crate) struct ChatWidget {
     stream_controller: Option<StreamController>,
     running_commands: HashMap<String, RunningCommand>,
     task_complete_pending: bool,
-    pr_checks_in_progress: bool,
     // Queue of interruptive UI events deferred during an active write cycle
     interrupts: InterruptManager,
     // Accumulates the current reasoning block text to extract a header
@@ -276,10 +251,11 @@ pub(crate) struct ChatWidget {
     pending_notification: Option<Notification>,
     // Simple review mode flag; used to adjust layout and banners.
     is_review_mode: bool,
-    review_orchestrator: Option<Orchestrator>,
     // List of ghost commits corresponding to each turn.
     ghost_snapshots: Vec<GhostCommit>,
     ghost_snapshots_disabled: bool,
+    // Whether to add a final message separator after the last message
+    needs_final_message_separator: bool,
 }
 
 struct UserMessage {
@@ -442,7 +418,7 @@ impl ChatWidget {
                     .and_then(|window| window.window_minutes),
             );
 
-            let display = history_cell::rate_limit_snapshot_display(&snapshot, Local::now());
+            let display = crate::status::rate_limit_snapshot_display(&snapshot, Local::now());
             self.rate_limit_snapshot = Some(display);
 
             if !warnings.is_empty() {
@@ -675,6 +651,14 @@ impl ChatWidget {
         self.flush_active_cell();
 
         if self.stream_controller.is_none() {
+            if self.needs_final_message_separator {
+                let elapsed_seconds = self
+                    .bottom_pane
+                    .status_widget()
+                    .map(super::status_indicator_widget::StatusIndicatorWidget::elapsed_seconds);
+                self.add_to_history(history_cell::FinalMessageSeparator::new(elapsed_seconds));
+                self.needs_final_message_separator = false;
+            }
             self.stream_controller = Some(StreamController::new(self.config.clone()));
         }
         if let Some(controller) = self.stream_controller.as_mut()
@@ -917,7 +901,6 @@ impl ChatWidget {
             stream_controller: None,
             running_commands: HashMap::new(),
             task_complete_pending: false,
-            pr_checks_in_progress: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
@@ -927,9 +910,9 @@ impl ChatWidget {
             suppress_session_configured_redraw: false,
             pending_notification: None,
             is_review_mode: false,
-            review_orchestrator: None,
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
+            needs_final_message_separator: false,
         }
     }
 
@@ -980,7 +963,6 @@ impl ChatWidget {
             stream_controller: None,
             running_commands: HashMap::new(),
             task_complete_pending: false,
-            pr_checks_in_progress: false,
             interrupts: InterruptManager::new(),
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
@@ -990,9 +972,9 @@ impl ChatWidget {
             suppress_session_configured_redraw: true,
             pending_notification: None,
             is_review_mode: false,
-            review_orchestrator: None,
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
+            needs_final_message_separator: false,
         }
     }
 
@@ -1110,9 +1092,6 @@ impl ChatWidget {
             SlashCommand::Review => {
                 self.open_review_popup();
             }
-            SlashCommand::PrChecks => {
-                self.start_pr_checks();
-            }
             SlashCommand::Model => {
                 self.open_model_popup();
             }
@@ -1222,6 +1201,7 @@ impl ChatWidget {
 
     fn flush_active_cell(&mut self) {
         if let Some(active) = self.active_cell.take() {
+            self.needs_final_message_separator = true;
             self.app_event_tx.send(AppEvent::InsertHistoryCell(active));
         }
     }
@@ -1234,6 +1214,7 @@ impl ChatWidget {
         if !cell.display_lines(u16::MAX).is_empty() {
             // Only break exec grouping if the cell renders visible lines.
             self.flush_active_cell();
+            self.needs_final_message_separator = true;
         }
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
     }
@@ -1275,6 +1256,7 @@ impl ChatWidget {
         if !text.is_empty() {
             self.add_to_history(history_cell::new_user_prompt(text));
         }
+        self.needs_final_message_separator = false;
     }
 
     fn capture_ghost_snapshot(&mut self) {
@@ -1450,33 +1432,6 @@ impl ChatWidget {
     }
 
     fn on_exited_review_mode(&mut self, review: ExitedReviewModeEvent) {
-        let mut handled_by_orchestrator = false;
-        if let Some(orc) = self.review_orchestrator.as_mut()
-            && let Some(ref output) = review.review_output
-        {
-            match orc.stage() {
-                OrchestratorStage::Batching => {
-                    orc.on_batch_result(output);
-                    handled_by_orchestrator = true;
-                }
-                OrchestratorStage::Consolidation => {
-                    orc.on_consolidation_result(output);
-                    self.review_orchestrator = None;
-                }
-                OrchestratorStage::Done => {
-                    self.review_orchestrator = None;
-                }
-            }
-        } else if review.review_output.is_none() {
-            self.review_orchestrator = None;
-        }
-
-        if handled_by_orchestrator {
-            self.is_review_mode = false;
-            self.request_redraw();
-            return;
-        }
-
         // Leave review mode; if output is present, flush pending stream + show results.
         if let Some(output) = review.review_output {
             self.flush_answer_stream_with_separator();
@@ -1486,7 +1441,7 @@ impl ChatWidget {
             if output.findings.is_empty() {
                 let explanation = output.overall_explanation.trim().to_string();
                 if explanation.is_empty() {
-                    error!("Reviewer failed to output a response.");
+                    tracing::error!("Reviewer failed to output a response.");
                     self.add_to_history(history_cell::new_error_event(
                         "Reviewer failed to output a response.".to_owned(),
                     ));
@@ -1601,140 +1556,12 @@ impl ChatWidget {
             default_usage = TokenUsage::default();
             &default_usage
         };
-        self.add_to_history(history_cell::new_status_output(
+        self.add_to_history(crate::status::new_status_output(
             &self.config,
             usage_ref,
             &self.conversation_id,
             self.rate_limit_snapshot.as_ref(),
         ));
-    }
-
-    pub(crate) fn start_pr_checks(&mut self) {
-        if self.pr_checks_in_progress {
-            self.add_info_message(
-                "PR checks are already running.".to_string(),
-                Some(
-                    "Wait for the current run to finish before using /pr-checks again.".to_string(),
-                ),
-            );
-            return;
-        }
-
-        self.pr_checks_in_progress = true;
-        self.add_info_message(format!("Running {PR_CHECKS_COMMAND_DISPLAY}..."), None);
-
-        let tx = self.app_event_tx.clone();
-        let cwd = self.config.cwd.clone();
-        tokio::spawn(async move {
-            let outcome = run_pr_checks(cwd).await;
-            tx.send(AppEvent::PrChecksFinished(outcome));
-        });
-    }
-
-    pub(crate) fn on_pr_checks_finished(&mut self, outcome: PrChecksOutcome) {
-        self.pr_checks_in_progress = false;
-
-        let PrChecksOutcome {
-            success,
-            exit_status,
-            stdout,
-            stderr,
-            spawn_error,
-        } = outcome;
-
-        if spawn_error.is_some() {
-            if let Some(error) = spawn_error.as_deref() {
-                self.add_error_message(format!(
-                    "Failed to run {PR_CHECKS_COMMAND_DISPLAY}: {error}"
-                ));
-            }
-            self.begin_fixing_pr_checks(spawn_error, exit_status, stdout, stderr);
-            return;
-        }
-
-        if success {
-            let mut message = format!("{PR_CHECKS_COMMAND_DISPLAY} completed successfully.");
-            if let Some(snippet) = Self::format_pr_checks_output_snippet(&stdout, &stderr) {
-                message.push_str("\n\n");
-                message.push_str(&snippet);
-            }
-            self.add_info_message(message, None);
-        } else {
-            let exit_description = exit_status
-                .map(|code| format!("exit code {code}"))
-                .unwrap_or_else(|| "no exit status (terminated by signal)".to_string());
-
-            self.add_error_message(format!(
-                "{PR_CHECKS_COMMAND_DISPLAY} failed with {exit_description}. Starting automatic fix."
-            ));
-            self.begin_fixing_pr_checks(spawn_error, exit_status, stdout, stderr);
-        }
-    }
-
-    fn begin_fixing_pr_checks(
-        &mut self,
-        spawn_error: Option<String>,
-        exit_status: Option<i32>,
-        stdout: String,
-        stderr: String,
-    ) {
-        if let Some(error) = spawn_error {
-            let truncated = truncate_text(&error, PR_CHECKS_OUTPUT_MAX_GRAPHEMES);
-            let mut message = format!(
-                "{PR_CHECKS_COMMAND_DISPLAY} could not be executed. Please resolve the underlying issue and ensure the PR checks pass."
-            );
-            message.push_str("\n\nSpawn error:\n```\n");
-            message.push_str(&truncated);
-            message.push_str("\n```");
-            message.push_str(
-                "\n\nAfter addressing the problems, run the `run_pr_checks` tool to verify the checks succeed.",
-            );
-            self.submit_text_message(message);
-            return;
-        }
-
-        let exit_description = exit_status
-            .map(|code| format!("exit code {code}"))
-            .unwrap_or_else(|| "no exit status (terminated by signal)".to_string());
-
-        let mut message = format!(
-            "{PR_CHECKS_COMMAND_DISPLAY} failed with {exit_description}. Please fix the issues reported by the PR checks."
-        );
-
-        if let Some(snippet) = Self::format_pr_checks_output_snippet(&stdout, &stderr) {
-            message.push_str("\n\n");
-            message.push_str(&snippet);
-        }
-
-        message.push_str(
-            "\n\nAfter addressing the problems, run the `run_pr_checks` tool to verify the checks succeed.",
-        );
-
-        self.submit_text_message(message);
-    }
-
-    fn format_pr_checks_output_snippet(stdout: &str, stderr: &str) -> Option<String> {
-        let mut blocks = Vec::new();
-        if let Some(block) = Self::format_pr_checks_output_block("stdout", stdout) {
-            blocks.push(block);
-        }
-        if let Some(block) = Self::format_pr_checks_output_block("stderr", stderr) {
-            blocks.push(block);
-        }
-        if blocks.is_empty() {
-            None
-        } else {
-            Some(blocks.join("\n\n"))
-        }
-    }
-
-    fn format_pr_checks_output_block(label: &str, content: &str) -> Option<String> {
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        let truncated = truncate_text(trimmed, PR_CHECKS_OUTPUT_MAX_GRAPHEMES);
-        Some(format!("{label}:\n```\n{truncated}\n```"))
     }
 
     /// Open a popup to choose the model preset (model + reasoning effort).
@@ -1985,31 +1812,15 @@ impl ChatWidget {
             search_value: None,
         });
 
-        let cwd_for_standard = self.config.cwd.clone();
         items.push(SelectionItem {
-            name: "Quick review against a base branch".to_string(),
-            description: Some("Single-pass review versus a selected base".to_string()),
+            name: "Review against a base branch".to_string(),
+            description: None,
             is_current: false,
-            actions: vec![Box::new(move |tx| {
-                tx.send(AppEvent::OpenReviewBranchPicker {
-                    cwd: cwd_for_standard.clone(),
-                    mode: ReviewBranchMode::Standard,
-                });
-            })],
-            dismiss_on_select: false,
-            search_value: None,
-        });
-
-        let cwd_for_deep = self.config.cwd.clone();
-        items.push(SelectionItem {
-            name: "Deep review against a base branch".to_string(),
-            description: Some("Batch large diffs for a thorough pass".to_string()),
-            is_current: false,
-            actions: vec![Box::new(move |tx| {
-                tx.send(AppEvent::OpenReviewBranchPicker {
-                    cwd: cwd_for_deep.clone(),
-                    mode: ReviewBranchMode::Deep,
-                });
+            actions: vec![Box::new({
+                let cwd = self.config.cwd.clone();
+                move |tx| {
+                    tx.send(AppEvent::OpenReviewBranchPicker(cwd.clone()));
+                }
             })],
             dismiss_on_select: false,
             search_value: None,
@@ -2034,7 +1845,7 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) async fn show_review_branch_picker(&mut self, cwd: &Path, mode: ReviewBranchMode) {
+    pub(crate) async fn show_review_branch_picker(&mut self, cwd: &Path) {
         let branches = local_git_branches(cwd).await;
         let current_branch = current_branch_name(cwd)
             .await
@@ -2043,114 +1854,33 @@ impl ChatWidget {
 
         for option in branches {
             let branch = option.clone();
-            let name = format!("{current_branch} -> {branch}");
-            let event_base = branch.clone();
             items.push(SelectionItem {
-                name,
+                name: format!("{current_branch} -> {branch}"),
                 description: None,
                 is_current: false,
                 actions: vec![Box::new(move |tx3: &AppEventSender| {
-                    tx3.send(AppEvent::StartBranchReview {
-                        base: event_base.clone(),
-                        mode,
-                    });
+                    tx3.send(AppEvent::CodexOp(Op::Review {
+                        review_request: ReviewRequest {
+                            prompt: format!(
+                                "Review the code changes against the base branch '{branch}'. Start by finding the merge diff between the current branch and {branch}'s upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \"{branch}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes we would merge into the {branch} branch. Provide prioritized, actionable findings."
+                            ),
+                            user_facing_hint: format!("changes against '{branch}'"),
+                        },
+                    }));
                 })],
                 dismiss_on_select: true,
                 search_value: Some(option),
             });
         }
 
-        let title = match mode {
-            ReviewBranchMode::Standard => "Select a base branch".to_string(),
-            ReviewBranchMode::Deep => "Select a base branch for deep review".to_string(),
-        };
-
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title,
+            title: "Select a base branch".to_string(),
             footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
             items,
             is_searchable: true,
             search_placeholder: Some("Type to search branches".to_string()),
             ..Default::default()
         });
-    }
-
-    pub(crate) async fn start_standard_branch_review(&mut self, base: String, reason: String) {
-        self.review_orchestrator = None;
-        let size_hint_line = match branch_shortstat(&base).await {
-            Ok(Some(stats)) => format!("Diff stats: {stats}"),
-            Ok(None) => String::new(),
-            Err(err) => {
-                warn!(%err, "failed to compute diff stats for {base}");
-                String::new()
-            }
-        };
-
-        let prompt = REVIEW_BRANCH_PROMPT_TMPL
-            .replace("{base}", &base)
-            .replace("{size_hint_line}", &size_hint_line);
-        let hint = format!("changes against '{base}'");
-
-        self.add_to_history(history_cell::new_review_status_line(format!(
-            "Reviewing changes vs {base} ({reason})",
-        )));
-
-        self.app_event_tx.send(AppEvent::CodexOp(Op::Review {
-            review_request: ReviewRequest {
-                prompt,
-                user_facing_hint: hint,
-            },
-        }));
-    }
-
-    pub(crate) async fn start_deep_branch_review(
-        &mut self,
-        base: String,
-        reason: String,
-    ) -> AnyResult<()> {
-        self.review_orchestrator = None;
-        let diff_stats = match branch_shortstat(&base).await {
-            Ok(Some(stats)) => Some(stats),
-            Ok(None) => None,
-            Err(err) => {
-                warn!(%err, "failed to compute diff stats for {base}");
-                None
-            }
-        };
-
-        if let Some(ref stats) = diff_stats {
-            self.add_to_history(history_cell::new_review_status_line(format!(
-                "Diff stats vs {base}: {stats}",
-            )));
-        }
-
-        let orchestrator = Orchestrator::new(
-            self.app_event_tx.clone(),
-            base.clone(),
-            reason.clone(),
-            REVIEW_BRANCH_LIMITS,
-            REVIEW_BRANCH_BATCH_PROMPT_TMPL,
-            REVIEW_BRANCH_CONSOLIDATION_PROMPT_TMPL,
-        )
-        .await?;
-
-        if !orchestrator.has_batches() {
-            // Branch diff small enough for a single pass; fall back to standard review.
-            self.start_standard_branch_review(base, reason).await;
-            return Ok(());
-        }
-
-        let total_batches = orchestrator.batches.len();
-        self.add_to_history(history_cell::new_review_status_line(format!(
-            "Deep review vs {base} ({reason}) — planning {total_batches} batch(es)",
-        )));
-
-        self.review_orchestrator = Some(orchestrator);
-        if let Some(orc) = self.review_orchestrator.as_mut() {
-            orc.start();
-        }
-
-        Ok(())
     }
 
     pub(crate) async fn show_review_commit_picker(&mut self, cwd: &Path) {

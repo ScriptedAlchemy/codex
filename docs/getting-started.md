@@ -100,11 +100,6 @@ codex completion zsh
 codex completion fish
 ```
 
-#### Slash commands
-
-- `/review` — review current changes in your working tree.
-- `/review-branch` — review all changes on the current Git branch compared to its base branch (e.g., origin/main). Helpful for PR-sized reviews; uses the same structured findings output as `/review`.
-
 #### `--cd`/`-C` flag
 
 Sometimes it is not convenient to `cd` to the directory you want Codex to use as the "working root" before running Codex. Fortunately, `codex` supports a `--cd` option so you can specify whatever folder you want. You can confirm that Codex is honoring `--cd` by double-checking the **workdir** it reports in the TUI at the start of a new session.

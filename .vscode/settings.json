@@ -3,18 +3,16 @@
     "rust-analyzer.check.command": "clippy",
     "rust-analyzer.check.extraArgs": ["--all-features", "--tests"],
     "rust-analyzer.rustfmt.extraArgs": ["--config", "imports_granularity=Item"],
-    // Force VS Code to use the toolchain‑matched rust‑analyzer to avoid proc‑macro ABI mismatches.
-    "rust-analyzer.server.path": "/Users/bytedance/.rustup/toolchains/1.89.0-aarch64-apple-darwin/bin/rust-analyzer",
     "[rust]": {
         "editor.defaultFormatter": "rust-lang.rust-analyzer",
-        "editor.formatOnSave": true,
+        "editor.formatOnSave": true
     },
     "[toml]": {
         "editor.defaultFormatter": "tamasfe.even-better-toml",
-        "editor.formatOnSave": true,
+        "editor.formatOnSave": true
     },
     // Array order for options in ~/.codex/config.toml such as `notify` and the
     // `args` for an MCP server is significant, so we disable reordering.
     "evenBetterToml.formatter.reorderArrays": false,
-    "evenBetterToml.formatter.reorderKeys": true,
+    "evenBetterToml.formatter.reorderKeys": true
 }

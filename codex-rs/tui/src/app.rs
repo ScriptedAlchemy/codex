@@ -298,9 +298,6 @@ impl App {
                 ));
                 tui.frame_requester().schedule_frame();
             }
-            AppEvent::PrChecksFinished(outcome) => {
-                self.chat_widget.on_pr_checks_finished(outcome);
-            }
             AppEvent::StartFileSearch(query) => {
                 if !query.is_empty() {
                     self.file_search.on_user_query(query);
@@ -357,8 +354,8 @@ impl App {
             AppEvent::UpdateSandboxPolicy(policy) => {
                 self.chat_widget.set_sandbox_policy(policy);
             }
-            AppEvent::OpenReviewBranchPicker { cwd, mode } => {
-                self.chat_widget.show_review_branch_picker(&cwd, mode).await;
+            AppEvent::OpenReviewBranchPicker(cwd) => {
+                self.chat_widget.show_review_branch_picker(&cwd).await;
             }
             AppEvent::OpenReviewCommitPicker(cwd) => {
                 self.chat_widget.show_review_commit_picker(&cwd).await;
@@ -366,28 +363,6 @@ impl App {
             AppEvent::OpenReviewCustomPrompt => {
                 self.chat_widget.show_review_custom_prompt();
             }
-            AppEvent::StartBranchReview { base, mode } => match mode {
-                crate::app_event::ReviewBranchMode::Standard => {
-                    let reason = format!("user-selected base: {base}");
-                    self.chat_widget
-                        .start_standard_branch_review(base, reason)
-                        .await;
-                }
-                crate::app_event::ReviewBranchMode::Deep => {
-                    let reason = format!("user-selected base: {base}");
-                    let base_for_error = base.clone();
-                    if let Err(err) = self
-                        .chat_widget
-                        .start_deep_branch_review(base, reason)
-                        .await
-                    {
-                        tracing::error!(%err, "failed to start deep review");
-                        self.chat_widget.add_error_message(format!(
-                            "Failed to start deep review vs {base_for_error}: {err}"
-                        ));
-                    }
-                }
-            },
         }
         Ok(true)
     }
