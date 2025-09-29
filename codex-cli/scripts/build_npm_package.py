@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -16,10 +17,18 @@ REPO_ROOT = CODEX_CLI_ROOT.parent
 RESPONSES_API_PROXY_NPM_ROOT = REPO_ROOT / "codex-rs" / "responses-api-proxy" / "npm"
 GITHUB_REPO = "openai/codex"
 
+sys.path.insert(0, str(SCRIPT_DIR))
+from install_native_deps import DEFAULT_WORKFLOW_URL as INSTALL_DEFAULT_WORKFLOW_URL  # noqa: E402
+
 # The docs are not clear on what the expected value/format of
 # workflow/workflowName is:
 # https://cli.github.com/manual/gh_run_list
 WORKFLOW_NAME = ".github/workflows/rust-release.yml"
+
+FALLBACK_WORKFLOW_URL = os.environ.get(
+    "CODEX_NATIVE_WORKFLOW_FALLBACK_URL",
+    INSTALL_DEFAULT_WORKFLOW_URL,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,17 +99,45 @@ def main() -> int:
         resolved_head_sha: str | None = None
         if not workflow_url:
             if release_version:
-                workflow = resolve_release_workflow(version)
-                workflow_url = workflow["url"]
-                resolved_head_sha = workflow.get("headSha")
+                try:
+                    workflow = resolve_release_workflow(version)
+                except Exception as exc:  # pragma: no cover - best effort fallback
+                    print(
+                        "Warning: unable to resolve rust-release workflow for "
+                        f"version {version}: {exc}",
+                        file=sys.stderr,
+                    )
+                    workflow = None
+                if workflow:
+                    workflow_url = workflow.get("url")
+                    resolved_head_sha = workflow.get("headSha")
             else:
-                workflow_url = resolve_latest_alpha_workflow_url()
+                try:
+                    workflow_url = resolve_latest_alpha_workflow_url()
+                except Exception as exc:  # pragma: no cover - best effort fallback
+                    print(
+                        f"Warning: unable to resolve latest alpha workflow: {exc}",
+                        file=sys.stderr,
+                    )
         elif release_version:
             try:
                 workflow = resolve_release_workflow(version)
                 resolved_head_sha = workflow.get("headSha")
-            except Exception:
+            except Exception as exc:  # pragma: no cover - best effort fallback
+                print(
+                    "Warning: unable to verify rust-release workflow for "
+                    f"version {version}: {exc}",
+                    file=sys.stderr,
+                )
                 resolved_head_sha = None
+
+        if not workflow_url and FALLBACK_WORKFLOW_URL:
+            print(
+                "Warning: falling back to default native artifact workflow "
+                f"{FALLBACK_WORKFLOW_URL}",
+                file=sys.stderr,
+            )
+            workflow_url = FALLBACK_WORKFLOW_URL
 
         if release_version and resolved_head_sha:
             print(f"should `git checkout {resolved_head_sha}`")
