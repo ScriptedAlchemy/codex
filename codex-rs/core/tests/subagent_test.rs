@@ -1,6 +1,5 @@
 //! Integration tests for async subagent system
 
-use codex_core::CodexConversation;
 use codex_core::subagent::NotificationType;
 use codex_core::subagent::SubagentId;
 use codex_core::subagent::SubagentManager;
@@ -128,7 +127,7 @@ async fn test_subagent_manager_concurrent_access() {
 #[tokio::test]
 async fn test_subagent_id_display() {
     let id = SubagentId::new();
-    let display_str = format!("{}", id);
+    let display_str = format!("{id}");
     let as_str = id.as_str();
 
     assert_eq!(display_str, as_str);

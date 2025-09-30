@@ -95,8 +95,8 @@ fn test_tool_descriptions_not_empty() {
         let name = json["name"].as_str().unwrap();
         let desc = json["description"].as_str().unwrap();
 
-        assert!(!desc.is_empty(), "Tool {} has empty description", name);
-        assert!(desc.len() > 20, "Tool {} description is too short", name);
+        assert!(!desc.is_empty(), "Tool {name} has empty description");
+        assert!(desc.len() > 20, "Tool {name} description is too short");
     }
 }
 
@@ -116,7 +116,7 @@ fn test_tools_serialize_correctly() {
         let json_value = serde_json::to_value(tool).unwrap();
         let name = json_value["name"].as_str().unwrap();
 
-        assert!(json.is_ok(), "Tool {} failed to serialize", name);
+        assert!(json.is_ok(), "Tool {name} failed to serialize");
 
         // Verify required fields are present
         assert!(json_value["name"].is_string());

@@ -195,7 +195,7 @@ impl SubagentManager {
     /// List all subagents
     pub async fn list_subagents(&self) -> Vec<SubagentInfo> {
         let subagents = self.subagents.read().await;
-        let mut infos: Vec<_> = subagents.values().map(|s| s.info()).collect();
+        let mut infos: Vec<_> = subagents.values().map(Subagent::info).collect();
 
         // Sort by last activity, most recent first
         infos.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
@@ -208,7 +208,7 @@ impl SubagentManager {
         let subagents = self.subagents.read().await;
         subagents
             .get(id)
-            .map(|s| s.info())
+            .map(Subagent::info)
             .ok_or_else(|| CodexErr::SubagentNotFound(id.clone()))
     }
 
