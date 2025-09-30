@@ -1,9 +1,10 @@
 //! Tests for subagent tool definitions
 
-use codex_core::subagent_tools::{
-    check_inbox_tool, create_subagent_tool, end_subagent_tool, list_subagents_tool,
-    reply_to_subagent_tool,
-};
+use codex_core::subagent_tools::check_inbox_tool;
+use codex_core::subagent_tools::create_subagent_tool;
+use codex_core::subagent_tools::end_subagent_tool;
+use codex_core::subagent_tools::list_subagents_tool;
+use codex_core::subagent_tools::reply_to_subagent_tool;
 
 #[test]
 fn test_create_subagent_tool_definition() {
@@ -94,16 +95,8 @@ fn test_tool_descriptions_not_empty() {
         let name = json["name"].as_str().unwrap();
         let desc = json["description"].as_str().unwrap();
 
-        assert!(
-            !desc.is_empty(),
-            "Tool {} has empty description",
-            name
-        );
-        assert!(
-            desc.len() > 20,
-            "Tool {} description is too short",
-            name
-        );
+        assert!(!desc.is_empty(), "Tool {} has empty description", name);
+        assert!(desc.len() > 20, "Tool {} description is too short", name);
     }
 }
 

@@ -1,6 +1,7 @@
 //! Tool definitions for async subagent operations
 
-use crate::openai_tools::{JsonSchema, ResponsesApiTool};
+use crate::openai_tools::JsonSchema;
+use crate::openai_tools::ResponsesApiTool;
 use std::collections::BTreeMap;
 
 /// Tool for creating a new subagent
@@ -59,7 +60,10 @@ pub fn check_inbox_tool() -> ResponsesApiTool {
     properties.insert(
         "mark_as_read".to_string(),
         JsonSchema::Boolean {
-            description: Some("Whether to mark the retrieved notifications as read. Defaults to true.".to_string()),
+            description: Some(
+                "Whether to mark the retrieved notifications as read. Defaults to true."
+                    .to_string(),
+            ),
         },
     );
 

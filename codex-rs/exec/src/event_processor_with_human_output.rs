@@ -329,6 +329,12 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 }
                 println!("{}", truncated_output.style(self.dimmed));
             }
+            // Subagent-related events are currently no-ops for the human CLI output.
+            EventMsg::SubagentCreated(_)
+            | EventMsg::SubagentsListResponse(_)
+            | EventMsg::InboxResponse(_)
+            | EventMsg::SubagentReplySuccess(_)
+            | EventMsg::SubagentEnded(_) => {}
             EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
                 call_id: _,
                 invocation,

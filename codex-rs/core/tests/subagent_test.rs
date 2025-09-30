@@ -1,9 +1,10 @@
 //! Integration tests for async subagent system
 
-use codex_core::subagent::{
-    NotificationType, SubagentId, SubagentManager, SubagentState,
-};
 use codex_core::CodexConversation;
+use codex_core::subagent::NotificationType;
+use codex_core::subagent::SubagentId;
+use codex_core::subagent::SubagentManager;
+use codex_core::subagent::SubagentState;
 use std::sync::Arc;
 
 #[tokio::test]

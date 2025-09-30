@@ -175,10 +175,7 @@ pub enum Op {
     Review { review_request: ReviewRequest },
 
     /// Create a new async subagent
-    CreateSubagent {
-        task: String,
-        config: Option<Value>,
-    },
+    CreateSubagent { task: String, config: Option<Value> },
 
     /// List all active subagents
     ListSubagents,

@@ -268,11 +268,10 @@ impl SubagentManager {
         // so the tool/op remains usable. Delivery can be handled by a future
         // wiring or ignored depending on higher-level policy.
         if let Some(conv) = &subagent.conversation {
-            conv
-                .submit(Op::UserInput {
-                    items: vec![crate::protocol::InputItem::Text { text: message }],
-                })
-                .await?;
+            conv.submit(Op::UserInput {
+                items: vec![crate::protocol::InputItem::Text { text: message }],
+            })
+            .await?;
         }
 
         Ok(())
