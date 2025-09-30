@@ -174,6 +174,30 @@ pub enum Op {
     /// Request a code review from the agent.
     Review { review_request: ReviewRequest },
 
+    /// Create a new async subagent
+    CreateSubagent {
+        task: String,
+        config: Option<Value>,
+    },
+
+    /// List all active subagents
+    ListSubagents,
+
+    /// Check inbox for subagent notifications
+    CheckInbox {
+        subagent_id: Option<String>,
+        mark_as_read: bool,
+    },
+
+    /// Reply to a subagent
+    ReplyToSubagent {
+        subagent_id: String,
+        message: String,
+    },
+
+    /// End a subagent conversation
+    EndSubagent { subagent_id: String },
+
     /// Request to shut down codex instance.
     Shutdown,
 }
@@ -504,6 +528,21 @@ pub enum EventMsg {
 
     /// List of custom prompts available to the agent.
     ListCustomPromptsResponse(ListCustomPromptsResponseEvent),
+
+    /// Response to CreateSubagent operation
+    SubagentCreated(SubagentCreatedEvent),
+
+    /// Response to ListSubagents operation
+    SubagentsListResponse(SubagentsListResponseEvent),
+
+    /// Response to CheckInbox operation
+    InboxResponse(InboxResponseEvent),
+
+    /// Response to ReplyToSubagent operation
+    SubagentReplySuccess(SubagentReplySuccessEvent),
+
+    /// Response to EndSubagent operation
+    SubagentEnded(SubagentEndedEvent),
 
     PlanUpdate(UpdatePlanArgs),
 
@@ -1177,6 +1216,73 @@ pub struct McpListToolsResponseEvent {
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 pub struct ListCustomPromptsResponseEvent {
     pub custom_prompts: Vec<CustomPrompt>,
+}
+
+/// Response to CreateSubagent operation
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct SubagentCreatedEvent {
+    pub subagent_id: String,
+    pub task: String,
+}
+
+/// Response to ListSubagents operation
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct SubagentsListResponseEvent {
+    pub subagents: Vec<SubagentInfoEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct SubagentInfoEvent {
+    pub id: String,
+    pub task: String,
+    pub state: SubagentStateEvent,
+    pub created_at: String,
+    pub last_activity: String,
+    pub unread_count: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStateEvent {
+    Active,
+    Completed,
+    Error { message: String },
+}
+
+/// Response to CheckInbox operation
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct InboxResponseEvent {
+    pub notifications: Vec<SubagentNotificationEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct SubagentNotificationEvent {
+    pub subagent_id: String,
+    pub timestamp: String,
+    pub notification: NotificationTypeEvent,
+    pub read: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NotificationTypeEvent {
+    Message { content: String },
+    Question { content: String },
+    Completed { summary: String },
+    Error { message: String },
+}
+
+/// Response to ReplyToSubagent operation
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct SubagentReplySuccessEvent {
+    pub subagent_id: String,
+}
+
+/// Response to EndSubagent operation
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct SubagentEndedEvent {
+    pub subagent_id: String,
+    pub final_state: SubagentInfoEvent,
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize, TS)]

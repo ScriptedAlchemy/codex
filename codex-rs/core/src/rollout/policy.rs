@@ -68,6 +68,11 @@ pub(crate) fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::GetHistoryEntryResponse(_)
         | EventMsg::McpListToolsResponse(_)
         | EventMsg::ListCustomPromptsResponse(_)
+        | EventMsg::SubagentCreated(_)
+        | EventMsg::SubagentsListResponse(_)
+        | EventMsg::InboxResponse(_)
+        | EventMsg::SubagentReplySuccess(_)
+        | EventMsg::SubagentEnded(_)
         | EventMsg::PlanUpdate(_)
         | EventMsg::ShutdownComplete
         | EventMsg::ConversationPath(_) => false,

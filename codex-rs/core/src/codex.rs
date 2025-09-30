@@ -93,8 +93,10 @@ use crate::protocol::ExecApprovalRequestEvent;
 use crate::protocol::ExecCommandBeginEvent;
 use crate::protocol::ExecCommandEndEvent;
 use crate::protocol::FileChange;
+use crate::protocol::InboxResponseEvent;
 use crate::protocol::InputItem;
 use crate::protocol::ListCustomPromptsResponseEvent;
+use crate::protocol::NotificationTypeEvent as ProtoNotificationTypeEvent;
 use crate::protocol::Op;
 use crate::protocol::PatchApplyBeginEvent;
 use crate::protocol::PatchApplyEndEvent;
@@ -104,6 +106,12 @@ use crate::protocol::ReviewOutputEvent;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::SessionConfiguredEvent;
 use crate::protocol::StreamErrorEvent;
+use crate::protocol::SubagentCreatedEvent;
+use crate::protocol::SubagentEndedEvent;
+use crate::protocol::SubagentInfoEvent as ProtoSubagentInfoEvent;
+use crate::protocol::SubagentReplySuccessEvent;
+use crate::protocol::SubagentStateEvent as ProtoSubagentStateEvent;
+use crate::protocol::SubagentsListResponseEvent;
 use crate::protocol::Submission;
 use crate::protocol::TokenCountEvent;
 use crate::protocol::TokenUsage;
@@ -117,6 +125,10 @@ use crate::safety::assess_safety_for_untrusted_command;
 use crate::shell;
 use crate::state::ActiveTurn;
 use crate::state::SessionServices;
+use crate::subagent::NotificationType;
+use crate::subagent::SubagentId;
+use crate::subagent::SubagentManager;
+use crate::subagent::SubagentState;
 use crate::tasks::CompactTask;
 use crate::tasks::RegularTask;
 use crate::tasks::ReviewTask;
@@ -461,6 +473,7 @@ impl Session {
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
             user_shell: default_shell,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            subagent_manager: std::sync::Arc::new(SubagentManager::new()),
         };
 
         let sess = Arc::new(Session {
@@ -1347,6 +1360,184 @@ async fn submission_loop(
                     }),
                 };
                 sess.send_event(event).await;
+            }
+            Op::CreateSubagent { task, config: _ } => {
+                let sub_id = sub.id.clone();
+                let manager = sess.services.subagent_manager.clone();
+                match manager.create_subagent(task.clone(), None).await {
+                    Ok(subagent_id) => {
+                        let event = Event {
+                            id: sub_id,
+                            msg: EventMsg::SubagentCreated(SubagentCreatedEvent {
+                                subagent_id: subagent_id.as_str().to_string(),
+                                task,
+                            }),
+                        };
+                        sess.send_event(event).await;
+                    }
+                    Err(e) => {
+                        let event = Event {
+                            id: sub_id,
+                            msg: EventMsg::Error(ErrorEvent {
+                                message: format!("Failed to create subagent: {e}"),
+                            }),
+                        };
+                        sess.send_event(event).await;
+                    }
+                }
+            }
+            Op::ListSubagents => {
+                let sub_id = sub.id.clone();
+                let manager = sess.services.subagent_manager.clone();
+                let list = manager.list_subagents().await;
+
+                let subagents: Vec<ProtoSubagentInfoEvent> = list
+                    .into_iter()
+                    .map(|info| ProtoSubagentInfoEvent {
+                        id: info.id.as_str().to_string(),
+                        task: info.task,
+                        state: match info.state {
+                            SubagentState::Active => ProtoSubagentStateEvent::Active,
+                            SubagentState::Completed => ProtoSubagentStateEvent::Completed,
+                            SubagentState::Error { message } => {
+                                ProtoSubagentStateEvent::Error { message }
+                            }
+                        },
+                        created_at: info.created_at.to_rfc3339(),
+                        last_activity: info.last_activity.to_rfc3339(),
+                        unread_count: info.unread_count,
+                    })
+                    .collect();
+
+                let event = Event {
+                    id: sub_id,
+                    msg: EventMsg::SubagentsListResponse(SubagentsListResponseEvent { subagents }),
+                };
+                sess.send_event(event).await;
+            }
+            Op::CheckInbox {
+                subagent_id,
+                mark_as_read,
+            } => {
+                let sub_id = sub.id.clone();
+                let manager = sess.services.subagent_manager.clone();
+                let notifications = if let Some(id) = subagent_id {
+                    match manager
+                        .check_subagent_inbox(&SubagentId::from(id), mark_as_read)
+                        .await
+                    {
+                        Ok(n) => n,
+                        Err(e) => {
+                            let event = Event {
+                                id: sub_id,
+                                msg: EventMsg::Error(ErrorEvent {
+                                    message: e.to_string(),
+                                }),
+                            };
+                            sess.send_event(event).await;
+                            continue;
+                        }
+                    }
+                } else {
+                    manager.check_inbox(mark_as_read).await
+                };
+
+                let notifications = notifications
+                    .into_iter()
+                    .map(|n| crate::protocol::SubagentNotificationEvent {
+                        subagent_id: n.subagent_id.as_str().to_string(),
+                        timestamp: n.timestamp.to_rfc3339(),
+                        notification: match n.notification {
+                            NotificationType::Message { content } => {
+                                ProtoNotificationTypeEvent::Message { content }
+                            }
+                            NotificationType::Question { content } => {
+                                ProtoNotificationTypeEvent::Question { content }
+                            }
+                            NotificationType::Completed { summary } => {
+                                ProtoNotificationTypeEvent::Completed { summary }
+                            }
+                            NotificationType::Error { message } => {
+                                ProtoNotificationTypeEvent::Error { message }
+                            }
+                        },
+                        read: n.read,
+                    })
+                    .collect();
+
+                let event = Event {
+                    id: sub_id,
+                    msg: EventMsg::InboxResponse(InboxResponseEvent { notifications }),
+                };
+                sess.send_event(event).await;
+            }
+            Op::ReplyToSubagent {
+                subagent_id,
+                message,
+            } => {
+                let sub_id = sub.id.clone();
+                let manager = sess.services.subagent_manager.clone();
+                let id = SubagentId::from(subagent_id.clone());
+                match manager.reply_to_subagent(&id, message).await {
+                    Ok(()) => {
+                        let event = Event {
+                            id: sub_id,
+                            msg: EventMsg::SubagentReplySuccess(SubagentReplySuccessEvent {
+                                subagent_id,
+                            }),
+                        };
+                        sess.send_event(event).await;
+                    }
+                    Err(e) => {
+                        let event = Event {
+                            id: sub_id,
+                            msg: EventMsg::Error(ErrorEvent {
+                                message: e.to_string(),
+                            }),
+                        };
+                        sess.send_event(event).await;
+                    }
+                }
+            }
+            Op::EndSubagent { subagent_id } => {
+                let sub_id = sub.id.clone();
+                let manager = sess.services.subagent_manager.clone();
+                let id = SubagentId::from(subagent_id.clone());
+                match manager.end_subagent(&id).await {
+                    Ok(info) => {
+                        let final_state = ProtoSubagentInfoEvent {
+                            id: info.id.as_str().to_string(),
+                            task: info.task,
+                            state: match info.state {
+                                SubagentState::Active => ProtoSubagentStateEvent::Active,
+                                SubagentState::Completed => ProtoSubagentStateEvent::Completed,
+                                SubagentState::Error { message } => {
+                                    ProtoSubagentStateEvent::Error { message }
+                                }
+                            },
+                            created_at: info.created_at.to_rfc3339(),
+                            last_activity: info.last_activity.to_rfc3339(),
+                            unread_count: info.unread_count,
+                        };
+                        let event = Event {
+                            id: sub_id,
+                            msg: EventMsg::SubagentEnded(SubagentEndedEvent {
+                                subagent_id,
+                                final_state,
+                            }),
+                        };
+                        sess.send_event(event).await;
+                    }
+                    Err(e) => {
+                        let event = Event {
+                            id: sub_id,
+                            msg: EventMsg::Error(ErrorEvent {
+                                message: e.to_string(),
+                            }),
+                        };
+                        sess.send_event(event).await;
+                    }
+                }
             }
             Op::Compact => {
                 // Attempt to inject input into current task
@@ -2417,6 +2608,201 @@ async fn handle_function_call(
             .await
         }
         "update_plan" => handle_update_plan(sess, arguments, sub_id, call_id).await,
+        // Subagent tools
+        "CreateSubagent" => {
+            #[derive(serde::Deserialize)]
+            struct Args {
+                task: String,
+                #[allow(dead_code)]
+                #[serde(default)]
+                config: Option<serde_json::Value>,
+            }
+            let Args { task, .. } = serde_json::from_str(&arguments).map_err(|e| {
+                FunctionCallError::RespondToModel(format!(
+                    "failed to parse function arguments: {e:?}"
+                ))
+            })?;
+
+            let manager = sess.services.subagent_manager.clone();
+            match manager.create_subagent(task.clone(), None).await {
+                Ok(subagent_id) => {
+                    // Emit event for UIs/recording
+                    let event = Event {
+                        id: sub_id.to_string(),
+                        msg: EventMsg::SubagentCreated(SubagentCreatedEvent {
+                            subagent_id: subagent_id.as_str().to_string(),
+                            task: task.clone(),
+                        }),
+                    };
+                    sess.send_event(event).await;
+
+                    Ok(serde_json::json!({
+                        "status": "ok",
+                        "subagent_id": subagent_id.as_str(),
+                        "task": task,
+                    })
+                    .to_string())
+                }
+                Err(e) => Err(FunctionCallError::RespondToModel(e.to_string())),
+            }
+        }
+        "ListSubagents" => {
+            let manager = sess.services.subagent_manager.clone();
+            let list = manager.list_subagents().await;
+            let subagents: Vec<ProtoSubagentInfoEvent> = list
+                .into_iter()
+                .map(|info| ProtoSubagentInfoEvent {
+                    id: info.id.as_str().to_string(),
+                    task: info.task,
+                    state: match info.state {
+                        SubagentState::Active => ProtoSubagentStateEvent::Active,
+                        SubagentState::Completed => ProtoSubagentStateEvent::Completed,
+                        SubagentState::Error { message } => {
+                            ProtoSubagentStateEvent::Error { message }
+                        }
+                    },
+                    created_at: info.created_at.to_rfc3339(),
+                    last_activity: info.last_activity.to_rfc3339(),
+                    unread_count: info.unread_count,
+                })
+                .collect();
+            let event = Event {
+                id: sub_id.to_string(),
+                msg: EventMsg::SubagentsListResponse(SubagentsListResponseEvent {
+                    subagents: subagents.clone(),
+                }),
+            };
+            sess.send_event(event).await;
+            Ok(serde_json::json!({"subagents": subagents}).to_string())
+        }
+        "CheckInbox" => {
+            #[derive(serde::Deserialize)]
+            struct Args {
+                #[serde(default)]
+                subagent_id: Option<String>,
+                #[serde(default = "default_mark")]
+                mark_as_read: bool,
+            }
+            fn default_mark() -> bool {
+                true
+            }
+            let Args {
+                subagent_id,
+                mark_as_read,
+            } = serde_json::from_str(&arguments).map_err(|e| {
+                FunctionCallError::RespondToModel(format!(
+                    "failed to parse function arguments: {e:?}"
+                ))
+            })?;
+
+            let manager = sess.services.subagent_manager.clone();
+            let notifications = if let Some(id) = subagent_id.clone() {
+                match manager
+                    .check_subagent_inbox(&SubagentId::from(id), mark_as_read)
+                    .await
+                {
+                    Ok(n) => n,
+                    Err(e) => return Err(FunctionCallError::RespondToModel(e.to_string())),
+                }
+            } else {
+                manager.check_inbox(mark_as_read).await
+            };
+            let notifications: Vec<crate::protocol::SubagentNotificationEvent> = notifications
+                .into_iter()
+                .map(|n| crate::protocol::SubagentNotificationEvent {
+                    subagent_id: n.subagent_id.as_str().to_string(),
+                    timestamp: n.timestamp.to_rfc3339(),
+                    notification: match n.notification {
+                        NotificationType::Message { content } => {
+                            ProtoNotificationTypeEvent::Message { content }
+                        }
+                        NotificationType::Question { content } => {
+                            ProtoNotificationTypeEvent::Question { content }
+                        }
+                        NotificationType::Completed { summary } => {
+                            ProtoNotificationTypeEvent::Completed { summary }
+                        }
+                        NotificationType::Error { message } => {
+                            ProtoNotificationTypeEvent::Error { message }
+                        }
+                    },
+                    read: n.read,
+                })
+                .collect();
+            let event = Event {
+                id: sub_id.to_string(),
+                msg: EventMsg::InboxResponse(InboxResponseEvent {
+                    notifications: notifications.clone(),
+                }),
+            };
+            sess.send_event(event).await;
+            Ok(serde_json::json!({"notifications": notifications}).to_string())
+        }
+        "ReplyToSubagent" => {
+            #[derive(serde::Deserialize)]
+            struct Args {
+                subagent_id: String,
+                message: String,
+            }
+            let Args {
+                subagent_id,
+                message,
+            } = serde_json::from_str(&arguments).map_err(|e| {
+                FunctionCallError::RespondToModel(format!(
+                    "failed to parse function arguments: {e:?}"
+                ))
+            })?;
+            let manager = sess.services.subagent_manager.clone();
+            let id = SubagentId::from(subagent_id.clone());
+            manager
+                .reply_to_subagent(&id, message)
+                .await
+                .map_err(|e| FunctionCallError::RespondToModel(e.to_string()))?;
+            let event = Event {
+                id: sub_id.to_string(),
+                msg: EventMsg::SubagentReplySuccess(SubagentReplySuccessEvent { subagent_id }),
+            };
+            sess.send_event(event).await;
+            Ok(serde_json::json!({"status": "ok"}).to_string())
+        }
+        "EndSubagent" => {
+            #[derive(serde::Deserialize)]
+            struct Args {
+                subagent_id: String,
+            }
+            let Args { subagent_id } = serde_json::from_str(&arguments).map_err(|e| {
+                FunctionCallError::RespondToModel(format!(
+                    "failed to parse function arguments: {e:?}"
+                ))
+            })?;
+            let manager = sess.services.subagent_manager.clone();
+            let id = SubagentId::from(subagent_id.clone());
+            let info = manager
+                .end_subagent(&id)
+                .await
+                .map_err(|e| FunctionCallError::RespondToModel(e.to_string()))?;
+            let final_state = ProtoSubagentInfoEvent {
+                id: info.id.as_str().to_string(),
+                task: info.task,
+                state: match info.state {
+                    SubagentState::Active => ProtoSubagentStateEvent::Active,
+                    SubagentState::Completed => ProtoSubagentStateEvent::Completed,
+                    SubagentState::Error { message } => ProtoSubagentStateEvent::Error { message },
+                },
+                created_at: info.created_at.to_rfc3339(),
+                last_activity: info.last_activity.to_rfc3339(),
+                unread_count: info.unread_count,
+            };
+            let event = Event {
+                id: sub_id.to_string(),
+                msg: EventMsg::SubagentEnded(SubagentEndedEvent {
+                    subagent_id,
+                    final_state: final_state.clone(),
+                }),
+            };
+            sess.send_event(event).await;
+            Ok(serde_json::json!({"final_state": final_state}).to_string())
+        }
         EXEC_COMMAND_TOOL_NAME => {
             // TODO(mbolin): Sandbox check.
             let exec_params: ExecCommandParams = serde_json::from_str(&arguments).map_err(|e| {
@@ -3419,6 +3805,7 @@ mod tests {
             codex_linux_sandbox_exe: None,
             user_shell: shell::Shell::Unknown,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            subagent_manager: std::sync::Arc::new(SubagentManager::new()),
         };
         let session = Session {
             conversation_id,
@@ -3486,6 +3873,7 @@ mod tests {
             codex_linux_sandbox_exe: None,
             user_shell: shell::Shell::Unknown,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            subagent_manager: std::sync::Arc::new(SubagentManager::new()),
         };
         let session = Arc::new(Session {
             conversation_id,

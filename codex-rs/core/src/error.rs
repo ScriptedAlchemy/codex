@@ -58,6 +58,9 @@ pub enum CodexErr {
     #[error("no conversation with id: {0}")]
     ConversationNotFound(ConversationId),
 
+    #[error("no subagent with id: {0}")]
+    SubagentNotFound(crate::subagent::SubagentId),
+
     #[error("session configured event was not the first event in the stream")]
     SessionConfiguredNotFirstEvent,
 
