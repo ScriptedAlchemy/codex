@@ -21,9 +21,6 @@ async fn test_create_subagent() {
 
 #[tokio::test]
 async fn test_subagent_notifications() {
-    let manager = SubagentManager::new();
-    let subagent_id = SubagentId::new();
-
     // Test notification creation
     let notification = NotificationType::Message {
         content: "Test message".to_string(),
@@ -112,7 +109,7 @@ async fn test_subagent_manager_concurrent_access() {
         let manager_clone = manager.clone();
         let handle = tokio::spawn(async move {
             let subagents = manager_clone.list_subagents().await;
-            assert!(subagents.len() >= 0); // Just verify it doesn't panic
+            assert!(subagents.is_empty());
             i
         });
         handles.push(handle);
