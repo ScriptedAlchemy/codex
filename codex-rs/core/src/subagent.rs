@@ -218,14 +218,14 @@ impl SubagentManager {
         let mut all_notifications = Vec::new();
 
         for subagent in subagents.values_mut() {
-            let notifications: Vec<_> = subagent.notifications.iter().cloned().collect();
-            all_notifications.extend(notifications);
-
             if mark_as_read {
                 for notif in &mut subagent.notifications {
                     notif.read = true;
                 }
             }
+
+            let notifications: Vec<_> = subagent.notifications.iter().cloned().collect();
+            all_notifications.extend(notifications);
         }
 
         // Sort by timestamp, most recent first
@@ -245,15 +245,13 @@ impl SubagentManager {
             .get_mut(id)
             .ok_or_else(|| CodexErr::SubagentNotFound(id.clone()))?;
 
-        let notifications: Vec<_> = subagent.notifications.iter().cloned().collect();
-
         if mark_as_read {
             for notif in &mut subagent.notifications {
                 notif.read = true;
             }
         }
 
-        Ok(notifications)
+        Ok(subagent.notifications.iter().cloned().collect())
     }
 
     /// Send a message to a subagent
