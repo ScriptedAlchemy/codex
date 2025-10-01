@@ -213,6 +213,9 @@ impl SubagentManager {
     }
 
     /// Check the inbox for notifications from all subagents
+    ///
+    /// When `mark_as_read` is `true`, notifications are marked as read and
+    /// removed from the inbox so they are not returned again.
     pub async fn check_inbox(&self, mark_as_read: bool) -> Vec<SubagentNotification> {
         let mut subagents = self.subagents.write().await;
         let mut all_notifications = Vec::new();
@@ -225,6 +228,11 @@ impl SubagentManager {
             }
 
             let notifications: Vec<_> = subagent.notifications.iter().cloned().collect();
+
+            if mark_as_read {
+                subagent.notifications.clear();
+            }
+
             all_notifications.extend(notifications);
         }
 
@@ -235,6 +243,9 @@ impl SubagentManager {
     }
 
     /// Check inbox for a specific subagent
+    ///
+    /// When `mark_as_read` is `true`, notifications are marked as read and
+    /// removed from that subagent's inbox.
     pub async fn check_subagent_inbox(
         &self,
         id: &SubagentId,
@@ -251,7 +262,13 @@ impl SubagentManager {
             }
         }
 
-        Ok(subagent.notifications.iter().cloned().collect())
+        let notifications: Vec<_> = subagent.notifications.iter().cloned().collect();
+
+        if mark_as_read {
+            subagent.notifications.clear();
+        }
+
+        Ok(notifications)
     }
 
     /// Send a message to a subagent

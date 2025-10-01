@@ -1,168 +1,282 @@
-//! Integration tests for async subagent system
+//! Integration tests for the async subagent system.
 
+use codex_core::error::CodexErr;
 use codex_core::subagent::NotificationType;
 use codex_core::subagent::SubagentId;
 use codex_core::subagent::SubagentManager;
 use codex_core::subagent::SubagentState;
-use std::sync::Arc;
+use pretty_assertions::assert_eq;
+use std::time::Duration;
+use tokio::time::sleep;
 
 #[tokio::test]
-async fn test_create_subagent() {
+async fn create_subagent_is_listed() {
     let manager = SubagentManager::new();
 
-    // Create a mock conversation (this would normally be a real CodexConversation)
-    // For now, we'll skip this as it requires full setup
-    // This test demonstrates the API structure
+    let id = manager
+        .create_subagent("track progress".to_string(), None)
+        .await
+        .unwrap();
 
-    // Verify manager starts empty
     let subagents = manager.list_subagents().await;
-    assert_eq!(subagents.len(), 0);
+    assert_eq!(1, subagents.len());
+    let info = &subagents[0];
+    assert_eq!(info.id.as_str(), id.as_str());
+    assert_eq!(info.task, "track progress");
+    assert_eq!(info.state, SubagentState::Active);
+    assert_eq!(0, info.unread_count);
 }
 
 #[tokio::test]
-async fn test_subagent_notifications() {
-    // Test notification creation
-    let notification = NotificationType::Message {
-        content: "Test message".to_string(),
-    };
-
-    // Verify notification types
-    assert!(!matches!(notification, NotificationType::Completed { .. }));
-    assert!(matches!(notification, NotificationType::Message { .. }));
-}
-
-#[tokio::test]
-async fn test_subagent_id_generation() {
-    let id1 = SubagentId::new();
-    let id2 = SubagentId::new();
-
-    // IDs should be unique
-    assert_ne!(id1, id2);
-    assert!(!id1.as_str().is_empty());
-    assert!(!id2.as_str().is_empty());
-}
-
-#[tokio::test]
-async fn test_subagent_state_transitions() {
-    // Test state enum values
-    let active = SubagentState::Active;
-    let completed = SubagentState::Completed;
-    let error = SubagentState::Error {
-        message: "Test error".to_string(),
-    };
-
-    assert_eq!(active, SubagentState::Active);
-    assert_eq!(completed, SubagentState::Completed);
-    assert!(matches!(error, SubagentState::Error { .. }));
-}
-
-#[tokio::test]
-async fn test_inbox_empty_initially() {
+async fn check_inbox_marks_read_and_clears() {
     let manager = SubagentManager::new();
+    let subagent_id = manager
+        .create_subagent("notify".to_string(), None)
+        .await
+        .unwrap();
 
-    // Check inbox when no subagents exist
+    manager
+        .add_notification(
+            &subagent_id,
+            NotificationType::Message {
+                content: "Initial update".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
     let notifications = manager.check_inbox(false).await;
-    assert_eq!(notifications.len(), 0);
-
-    let unread = manager.unread_count().await;
-    assert_eq!(unread, 0);
-}
-
-#[tokio::test]
-async fn test_notification_types() {
-    // Test all notification type variants
-    let message = NotificationType::Message {
-        content: "Message".to_string(),
-    };
-    let question = NotificationType::Question {
-        content: "Question?".to_string(),
-    };
-    let completed = NotificationType::Completed {
-        summary: "Done".to_string(),
-    };
-    let error = NotificationType::Error {
-        message: "Error!".to_string(),
-    };
-
-    // Verify they serialize/deserialize correctly
-    let message_json = serde_json::to_string(&message).unwrap();
-    assert!(message_json.contains("message"));
-
-    let question_json = serde_json::to_string(&question).unwrap();
-    assert!(question_json.contains("question"));
-
-    let completed_json = serde_json::to_string(&completed).unwrap();
-    assert!(completed_json.contains("completed"));
-
-    let error_json = serde_json::to_string(&error).unwrap();
-    assert!(error_json.contains("error"));
-}
-
-#[tokio::test]
-async fn test_subagent_manager_concurrent_access() {
-    let manager = Arc::new(SubagentManager::new());
-
-    // Spawn multiple tasks that access the manager concurrently
-    let mut handles = vec![];
-
-    for i in 0..10 {
-        let manager_clone = manager.clone();
-        let handle = tokio::spawn(async move {
-            let subagents = manager_clone.list_subagents().await;
-            assert!(subagents.is_empty());
-            i
-        });
-        handles.push(handle);
+    assert_eq!(1, notifications.len());
+    assert_eq!(notifications[0].subagent_id.as_str(), subagent_id.as_str());
+    assert!(!notifications[0].read);
+    match &notifications[0].notification {
+        NotificationType::Message { content } => assert_eq!(content, "Initial update"),
+        other => panic!("unexpected notification: {other:?}"),
     }
 
-    // Wait for all tasks to complete
-    for handle in handles {
-        handle.await.unwrap();
-    }
+    let notifications = manager.check_inbox(true).await;
+    assert_eq!(1, notifications.len());
+    assert!(notifications[0].read);
+
+    let info = manager.get_subagent_info(&subagent_id).await.unwrap();
+    assert_eq!(0, info.unread_count);
+    assert!(manager.check_inbox(false).await.is_empty());
 }
 
 #[tokio::test]
-async fn test_subagent_id_display() {
-    let id = SubagentId::new();
-    let display_str = format!("{id}");
-    let as_str = id.as_str();
+async fn check_subagent_inbox_only_clears_selected() {
+    let manager = SubagentManager::new();
+    let first = manager
+        .create_subagent("first".to_string(), None)
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(5)).await;
+    let second = manager
+        .create_subagent("second".to_string(), None)
+        .await
+        .unwrap();
 
-    assert_eq!(display_str, as_str);
-    assert!(!display_str.is_empty());
+    manager
+        .add_notification(
+            &first,
+            NotificationType::Question {
+                content: "Need guidance?".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    manager
+        .add_notification(
+            &second,
+            NotificationType::Message {
+                content: "Still running".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let notifications = manager.check_subagent_inbox(&first, false).await.unwrap();
+    assert_eq!(1, notifications.len());
+    assert!(!notifications[0].read);
+
+    let notifications = manager.check_subagent_inbox(&first, true).await.unwrap();
+    assert_eq!(1, notifications.len());
+    assert!(notifications[0].read);
+    assert!(
+        manager
+            .check_subagent_inbox(&first, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let info = manager.get_subagent_info(&second).await.unwrap();
+    assert_eq!(1, info.unread_count);
 }
 
 #[tokio::test]
-async fn test_notification_terminal_check() {
-    let message = NotificationType::Message {
-        content: "Test".to_string(),
-    };
-    let completed = NotificationType::Completed {
-        summary: "Done".to_string(),
-    };
-    let error = NotificationType::Error {
-        message: "Error".to_string(),
-    };
+async fn completed_notification_updates_state() {
+    let manager = SubagentManager::new();
+    let subagent_id = manager
+        .create_subagent("wrap up".to_string(), None)
+        .await
+        .unwrap();
 
-    // Terminal notifications should be Completed and Error
-    assert!(!notification_is_terminal(&message));
-    assert!(notification_is_terminal(&completed));
-    assert!(notification_is_terminal(&error));
-}
+    manager
+        .add_notification(
+            &subagent_id,
+            NotificationType::Completed {
+                summary: "All done".to_string(),
+            },
+        )
+        .await
+        .unwrap();
 
-// Helper function to test terminal state
-fn notification_is_terminal(notif: &NotificationType) -> bool {
-    matches!(
-        notif,
-        NotificationType::Completed { .. } | NotificationType::Error { .. }
-    )
+    let info = manager.get_subagent_info(&subagent_id).await.unwrap();
+    assert_eq!(SubagentState::Completed, info.state);
 }
 
 #[tokio::test]
-async fn test_manager_default() {
-    let manager1 = SubagentManager::new();
-    let manager2 = SubagentManager::default();
+async fn error_notification_updates_state() {
+    let manager = SubagentManager::new();
+    let subagent_id = manager
+        .create_subagent("might fail".to_string(), None)
+        .await
+        .unwrap();
 
-    // Both should start empty
-    assert_eq!(manager1.list_subagents().await.len(), 0);
-    assert_eq!(manager2.list_subagents().await.len(), 0);
+    manager
+        .add_notification(
+            &subagent_id,
+            NotificationType::Error {
+                message: "Disk full".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let info = manager.get_subagent_info(&subagent_id).await.unwrap();
+    assert_eq!(
+        SubagentState::Error {
+            message: "Disk full".to_string(),
+        },
+        info.state
+    );
+}
+
+#[tokio::test]
+async fn end_subagent_returns_final_state_and_removes() {
+    let manager = SubagentManager::new();
+    let subagent_id = manager
+        .create_subagent("cleanup".to_string(), None)
+        .await
+        .unwrap();
+
+    manager
+        .add_notification(
+            &subagent_id,
+            NotificationType::Completed {
+                summary: "Cleanup finished".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let final_state = manager.end_subagent(&subagent_id).await.unwrap();
+    assert_eq!(SubagentState::Completed, final_state.state);
+    assert!(manager.list_subagents().await.is_empty());
+}
+
+#[tokio::test]
+async fn reply_without_conversation_is_noop() {
+    let manager = SubagentManager::new();
+    let subagent_id = manager
+        .create_subagent("no wiring yet".to_string(), None)
+        .await
+        .unwrap();
+
+    manager
+        .reply_to_subagent(&subagent_id, "hello".to_string())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn reply_to_missing_subagent_returns_error() {
+    let manager = SubagentManager::new();
+    let missing = SubagentId::new();
+    let err = manager
+        .reply_to_subagent(&missing, "data".to_string())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, CodexErr::SubagentNotFound(_)));
+}
+
+#[tokio::test]
+async fn list_subagents_sorted_by_last_activity() {
+    let manager = SubagentManager::new();
+    let first = manager
+        .create_subagent("first".to_string(), None)
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(5)).await;
+    let second = manager
+        .create_subagent("second".to_string(), None)
+        .await
+        .unwrap();
+
+    manager
+        .add_notification(
+            &first,
+            NotificationType::Message {
+                content: "progress".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let list = manager.list_subagents().await;
+    assert_eq!(2, list.len());
+    assert_eq!(list[0].id.as_str(), first.as_str());
+    assert_eq!(list[1].id.as_str(), second.as_str());
+}
+
+#[tokio::test]
+async fn unread_count_across_multiple_subagents() {
+    let manager = SubagentManager::new();
+    let first = manager
+        .create_subagent("first".to_string(), None)
+        .await
+        .unwrap();
+    let second = manager
+        .create_subagent("second".to_string(), None)
+        .await
+        .unwrap();
+
+    manager
+        .add_notification(
+            &first,
+            NotificationType::Message {
+                content: "msg".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    manager
+        .add_notification(
+            &second,
+            NotificationType::Question {
+                content: "status?".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(2, manager.unread_count().await);
+
+    manager.check_subagent_inbox(&first, true).await.unwrap();
+    assert_eq!(1, manager.unread_count().await);
+
+    manager.check_inbox(true).await;
+    assert_eq!(0, manager.unread_count().await);
 }
