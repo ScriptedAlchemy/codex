@@ -14,7 +14,7 @@ use crate::protocol::EventMsg;
 use crate::protocol::SessionConfiguredEvent;
 use crate::rollout::RolloutRecorder;
 use crate::subagent::SubagentManager;
-use codex_protocol::mcp_protocol::ConversationId;
+use codex_protocol::ConversationId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::RolloutItem;
