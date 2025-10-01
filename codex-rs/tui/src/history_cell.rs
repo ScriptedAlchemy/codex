@@ -8,6 +8,7 @@ use crate::exec_command::relativize_to_home;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::markdown::MarkdownCitationContext;
 use crate::markdown::append_markdown;
+use crate::pr_checks::PrChecksOutcome;
 use crate::render::line_utils::line_to_static;
 use crate::render::line_utils::prefix_lines;
 use crate::style::user_message_style;
@@ -931,6 +932,76 @@ pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHist
     }
     let lines: Vec<Line<'static>> = vec![line.into()];
     PlainHistoryCell { lines }
+}
+
+pub(crate) fn new_pr_checks_result(outcome: PrChecksOutcome) -> PlainHistoryCell {
+    let PrChecksOutcome {
+        success,
+        exit_status,
+        stdout,
+        stderr,
+        spawn_error,
+    } = outcome;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if let Some(err) = spawn_error {
+        lines.push(vec!["✗".red().bold(), " `/pr-checks` failed to run".into()].into());
+        lines.push(vec!["  ".into(), err.into()].into());
+        return PlainHistoryCell::new(lines);
+    }
+
+    let status_line: Line<'static> = if success {
+        vec!["✓".green().bold(), " `/pr-checks` succeeded".into()].into()
+    } else if let Some(code) = exit_status {
+        vec![
+            "✗".red().bold(),
+            format!(" `/pr-checks` failed (exit code {code})").into(),
+        ]
+        .into()
+    } else {
+        vec!["✗".red().bold(), " `/pr-checks` failed".into()].into()
+    };
+    lines.push(status_line);
+
+    let append_stream =
+        |lines: &mut Vec<Line<'static>>, label: &str, content: &str, is_stderr: bool| {
+            if content.trim().is_empty() {
+                return;
+            }
+
+            lines.push(vec!["• ".dim(), label.to_string().bold()].into());
+
+            let output = if is_stderr {
+                CommandOutput {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: content.to_string(),
+                    formatted_output: String::new(),
+                }
+            } else {
+                CommandOutput {
+                    exit_code: 0,
+                    stdout: content.to_string(),
+                    stderr: String::new(),
+                    formatted_output: String::new(),
+                }
+            };
+
+            lines.extend(output_lines(
+                Some(&output),
+                OutputLinesParams {
+                    only_err: false,
+                    include_angle_pipe: true,
+                    include_prefix: true,
+                },
+            ));
+        };
+
+    append_stream(&mut lines, "stdout", &stdout, false);
+    append_stream(&mut lines, "stderr", &stderr, true);
+
+    PlainHistoryCell::new(lines)
 }
 
 pub(crate) fn new_error_event(message: String) -> PlainHistoryCell {

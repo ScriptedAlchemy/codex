@@ -55,6 +55,7 @@ mod markdown_render;
 mod markdown_stream;
 pub mod onboarding;
 mod pager_overlay;
+mod pr_checks;
 pub mod public_widgets;
 mod render;
 mod resume_picker;

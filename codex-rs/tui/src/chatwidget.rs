@@ -1141,6 +1141,21 @@ impl ChatWidget {
                     tx.send(AppEvent::DiffResult(text));
                 });
             }
+            SlashCommand::PrChecks => {
+                self.add_to_history(history_cell::new_info_event(
+                    "Running GitHub PR checks…".to_string(),
+                    Some("gh pr checks --watch".to_string()),
+                ));
+
+                let cwd = self.config.cwd.clone();
+                let tx = self.app_event_tx.clone();
+                tokio::spawn(async move {
+                    let outcome = crate::pr_checks::run_pr_checks(cwd).await;
+                    tx.send(AppEvent::InsertHistoryCell(Box::new(
+                        history_cell::new_pr_checks_result(outcome),
+                    )));
+                });
+            }
             SlashCommand::Mention => {
                 self.insert_str("@");
             }
