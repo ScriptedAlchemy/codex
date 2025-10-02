@@ -1,6 +1,6 @@
-import fs from "fs";
-import os from "os";
-import path from "path";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { codexExecSpy } from "./codexExecSpy";
 import { describe, expect, it } from "@jest/globals";
@@ -218,7 +218,6 @@ describe("Codex", () => {
       await close();
     }
   });
-
   it("runs in provided working directory", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
@@ -286,7 +285,6 @@ describe("Codex", () => {
     }
   });
 });
-
 function expectPair(args: string[] | undefined, pair: [string, string]) {
   if (!args) {
     throw new Error("Args is undefined");

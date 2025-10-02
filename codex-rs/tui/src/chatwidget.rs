@@ -80,7 +80,6 @@ use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
-use crate::history_cell::PatchEventType;
 use crate::markdown::append_markdown;
 use crate::review_branch::chunker::ChunkLimits;
 use crate::review_branch::orchestrator::Orchestrator;
@@ -560,9 +559,6 @@ impl ChatWidget {
 
     fn on_patch_apply_begin(&mut self, event: PatchApplyBeginEvent) {
         self.add_to_history(history_cell::new_patch_event(
-            PatchEventType::ApplyBegin {
-                auto_approved: event.auto_approved,
-            },
             event.changes,
             &self.config.cwd,
         ));
@@ -762,8 +758,6 @@ impl ChatWidget {
 
     pub(crate) fn handle_exec_approval_now(&mut self, id: String, ev: ExecApprovalRequestEvent) {
         self.flush_answer_stream_with_separator();
-        // Emit the proposed command into history (like proposed patches)
-        self.add_to_history(history_cell::new_proposed_command(&ev.command));
         let command = shlex::try_join(ev.command.iter().map(String::as_str))
             .unwrap_or_else(|_| ev.command.join(" "));
         self.notify(Notification::ExecApprovalRequested { command });
@@ -783,16 +777,12 @@ impl ChatWidget {
         ev: ApplyPatchApprovalRequestEvent,
     ) {
         self.flush_answer_stream_with_separator();
-        self.add_to_history(history_cell::new_patch_event(
-            PatchEventType::ApprovalRequest,
-            ev.changes.clone(),
-            &self.config.cwd,
-        ));
 
         let request = ApprovalRequest::ApplyPatch {
             id,
             reason: ev.reason,
-            grant_root: ev.grant_root,
+            changes: ev.changes.clone(),
+            cwd: self.config.cwd.clone(),
         };
         self.bottom_pane.push_approval_request(request);
         self.request_redraw();
@@ -1703,7 +1693,7 @@ impl ChatWidget {
         }
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: "Select model and reasoning level".to_string(),
+            title: Some("Select model and reasoning level".to_string()),
             subtitle: Some(
                 "Switch between OpenAI models for this and future Codex CLI session".to_string(),
             ),
@@ -1749,7 +1739,7 @@ impl ChatWidget {
         }
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: "Select Approval Mode".to_string(),
+            title: Some("Select Approval Mode".to_string()),
             footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
             items,
             ..Default::default()
@@ -1938,7 +1928,7 @@ impl ChatWidget {
         });
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: "Select a review preset".into(),
+            title: Some("Select a review preset".into()),
             footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
             items,
             ..Default::default()
@@ -1987,11 +1977,12 @@ impl ChatWidget {
             });
         }
 
+        let title = match mode {
+            ReviewBranchMode::Simple => "Select a base branch".to_string(),
+            ReviewBranchMode::Deep => "Select a base branch for deep review".to_string(),
+        };
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: match mode {
-                ReviewBranchMode::Simple => "Select a base branch".to_string(),
-                ReviewBranchMode::Deep => "Select a base branch for deep review".to_string(),
-            },
+            title: Some(title),
             footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
             items,
             is_searchable: true,
@@ -2069,7 +2060,7 @@ impl ChatWidget {
         }
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: "Select a commit to review".to_string(),
+            title: Some("Select a commit to review".to_string()),
             footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
             items,
             is_searchable: true,
@@ -2298,11 +2289,12 @@ pub(crate) fn show_review_branch_picker_with_entries(
         });
     }
 
+    let title = match mode {
+        ReviewBranchMode::Simple => "Select a base branch".to_string(),
+        ReviewBranchMode::Deep => "Select a base branch for deep review".to_string(),
+    };
     chat.bottom_pane.show_selection_view(SelectionViewParams {
-        title: match mode {
-            ReviewBranchMode::Simple => "Select a base branch".to_string(),
-            ReviewBranchMode::Deep => "Select a base branch for deep review".to_string(),
-        },
+        title: Some(title),
         footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
         items,
         is_searchable: true,
@@ -2345,7 +2337,7 @@ pub(crate) fn show_review_commit_picker_with_entries(
     }
 
     chat.bottom_pane.show_selection_view(SelectionViewParams {
-        title: "Select a commit to review".to_string(),
+        title: Some("Select a commit to review".to_string()),
         footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
         items,
         is_searchable: true,
