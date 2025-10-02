@@ -125,6 +125,7 @@ fn esc_hint_line(esc_backtrack_hint: bool) -> Line<'static> {
 
 fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
     let mut commands = String::new();
+    let mut submit = String::new();
     let mut newline = String::new();
     let mut file_paths = String::new();
     let mut paste_image = String::new();
@@ -136,6 +137,7 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
         if let Some(text) = descriptor.overlay_entry(state) {
             match descriptor.id {
                 ShortcutId::Commands => commands = text,
+                ShortcutId::Submit => submit = text,
                 ShortcutId::InsertNewline => newline = text,
                 ShortcutId::FilePaths => file_paths = text,
                 ShortcutId::PasteImage => paste_image = text,
@@ -146,16 +148,18 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
         }
     }
 
-    let ordered = vec![
-        commands,
-        newline,
-        file_paths,
-        paste_image,
-        edit_previous,
-        quit,
-        String::new(),
-        show_transcript,
-    ];
+    let mut ordered = Vec::new();
+    ordered.push(commands);
+    if !submit.is_empty() {
+        ordered.push(submit);
+    }
+    ordered.push(newline);
+    ordered.push(file_paths);
+    ordered.push(paste_image);
+    ordered.push(edit_previous);
+    ordered.push(quit);
+    ordered.push(String::new());
+    ordered.push(show_transcript);
 
     build_columns(ordered)
 }
@@ -237,6 +241,7 @@ fn context_window_line(percent: Option<u8>) -> Line<'static> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShortcutId {
     Commands,
+    Submit,
     InsertNewline,
     FilePaths,
     PasteImage,
@@ -289,6 +294,11 @@ impl ShortcutDescriptor {
     }
 
     fn overlay_entry(&self, state: ShortcutsState) -> Option<String> {
+        // Keep legacy snapshots stable: only show the explicit "send" (Enter)
+        // hint when glyphs are enabled (runtime or opted-in tests).
+        if matches!(self.id, ShortcutId::Submit) && !glyphs_enabled() {
+            return None;
+        }
         let binding = self.binding_for(state)?;
         let label = match self.id {
             ShortcutId::EditPrevious => {
@@ -310,29 +320,39 @@ impl ShortcutDescriptor {
 
 // Render friendly overlay key text. In tests, keep the original strings to
 // avoid churn in insta snapshots; at runtime use compact glyphs.
-fn binding_overlay_string(_id: ShortcutId, binding: &ShortcutBinding) -> String {
+fn binding_overlay_string(id: ShortcutId, binding: &ShortcutBinding) -> String {
+    if !glyphs_enabled() {
+        return binding.overlay_text.to_string();
+    }
+    use crossterm::event::KeyCode::*;
+    use crossterm::event::KeyModifiers as KM;
+    match (id, binding.modifiers, binding.code) {
+        // Send/Submit
+        (ShortcutId::Submit, KM::NONE, Enter) => "⏎".to_string(),
+        // Newline variants
+        (ShortcutId::InsertNewline, KM::SHIFT, Enter) => "⇧⏎".to_string(),
+        (ShortcutId::InsertNewline, KM::CONTROL, Char('j')) => "⌃J".to_string(),
+        // Control shortcuts
+        (ShortcutId::PasteImage, KM::CONTROL, Char('v')) => "⌃V".to_string(),
+        (ShortcutId::Quit, KM::CONTROL, Char('c')) => "⌃C".to_string(),
+        (ShortcutId::ShowTranscript, KM::CONTROL, Char('t')) => "⌃T".to_string(),
+        // Pass-through for simple literal keys
+        (ShortcutId::Commands, KM::NONE, Char('/')) => "/".to_string(),
+        (ShortcutId::FilePaths, KM::NONE, Char('@')) => "@".to_string(),
+        // Fallback to provided text
+        _ => binding.overlay_text.to_string(),
+    }
+}
+
+#[inline]
+fn glyphs_enabled() -> bool {
     #[cfg(test)]
     {
-        return binding.overlay_text.to_string();
+        return std::env::var("CODEX_TUI_TEST_FORCE_GLYPHS").ok().as_deref() == Some("1");
     }
     #[cfg(not(test))]
     {
-        use crossterm::event::KeyCode::*;
-        use crossterm::event::KeyModifiers as KM;
-        match (_id, binding.modifiers, binding.code) {
-            // Prefer glyphs for newline variants
-            (ShortcutId::InsertNewline, KM::SHIFT, Enter) => "⇧⏎".to_string(),
-            (ShortcutId::InsertNewline, KM::CONTROL, Char('j')) => "⌃J".to_string(),
-            // Control shortcuts
-            (ShortcutId::PasteImage, KM::CONTROL, Char('v')) => "⌃V".to_string(),
-            (ShortcutId::Quit, KM::CONTROL, Char('c')) => "⌃C".to_string(),
-            (ShortcutId::ShowTranscript, KM::CONTROL, Char('t')) => "⌃T".to_string(),
-            // Pass-through for simple literal keys
-            (ShortcutId::Commands, KM::NONE, Char('/')) => "/".to_string(),
-            (ShortcutId::FilePaths, KM::NONE, Char('@')) => "@".to_string(),
-            // Fallback to provided text
-            _ => binding.overlay_text.to_string(),
-        }
+        true
     }
 }
 
@@ -347,6 +367,17 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
         }],
         prefix: "",
         label: " for commands",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::Submit,
+        bindings: &[ShortcutBinding {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            overlay_text: "enter",
+            condition: DisplayCondition::Always,
+        }],
+        prefix: "",
+        label: " send",
     },
     ShortcutDescriptor {
         id: ShortcutId::InsertNewline,

@@ -326,6 +326,56 @@ fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) -> String {
     s
 }
 
+// Render the whole chat window and assert the footer shows key glyphs when
+// the shortcuts overlay is toggled. We force glyph rendering under tests via
+// an env var so existing snapshots remain unchanged elsewhere.
+#[test]
+fn footer_overlay_shows_glyph_hints_in_full_chat_window() {
+    // Force glyphs in tests
+    unsafe { std::env::set_var("CODEX_TUI_TEST_FORCE_GLYPHS", "1") };
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    // Toggle the shortcuts overlay (composer must be empty)
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+
+    // Render the full chat window using the VT100 test backend
+    let width: u16 = 80;
+    let ui_height: u16 = chat.desired_height(width).max(6);
+    let vt_height: u16 = ui_height + 2; // a touch of extra space
+    let viewport = ratatui::layout::Rect::new(0, vt_height - ui_height, width, ui_height);
+
+    let backend = crate::test_backend::VT100Backend::new(width, vt_height);
+    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+    term.set_viewport_area(viewport);
+
+    term.draw(|f| {
+        (&chat).render_ref(f.area(), f.buffer_mut());
+    })
+    .expect("draw");
+
+    let screen = term.backend().vt100().screen().contents();
+
+    // Expect the glyph key hints and labels to be present somewhere in the UI.
+    assert!(
+        screen.contains("⏎ send"),
+        "missing ⏎ send in footer: {screen}"
+    );
+    assert!(
+        screen.contains("⌃J") && screen.to_lowercase().contains("newline"),
+        "missing ⌃J newline in footer: {screen}"
+    );
+    assert!(
+        screen.contains("⌃T") && screen.to_lowercase().contains("transcript"),
+        "missing ⌃T transcript in footer: {screen}"
+    );
+    assert!(
+        screen.contains("⌃C")
+            && (screen.to_lowercase().contains("exit") || screen.to_lowercase().contains("quit")),
+        "missing ⌃C exit/quit in footer: {screen}"
+    );
+}
+
 #[test]
 fn rate_limit_warnings_emit_thresholds() {
     let mut state = RateLimitWarningState::default();
