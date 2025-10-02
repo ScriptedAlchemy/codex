@@ -1,4 +1,5 @@
 use std::io;
+use std::path::Path;
 use std::process::Stdio;
 
 use tokio::process::Command;
@@ -25,10 +26,11 @@ pub(crate) struct ChunkLimits {
     pub max_lines: usize,
 }
 
-pub(crate) async fn collect_branch_numstat(base: &str) -> io::Result<Vec<NumstatRow>> {
+pub(crate) async fn collect_branch_numstat(cwd: &Path, base: &str) -> io::Result<Vec<NumstatRow>> {
     // git diff --numstat base...HEAD
     let output = Command::new("git")
         .args(["diff", "--numstat", &format!("{base}...HEAD")])
+        .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()

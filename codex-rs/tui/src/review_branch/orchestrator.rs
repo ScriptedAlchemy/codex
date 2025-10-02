@@ -9,6 +9,7 @@ use crate::review_branch::chunker::Batch;
 use crate::review_branch::chunker::ChunkLimits;
 use crate::review_branch::chunker::collect_branch_numstat;
 use crate::review_branch::chunker::score_and_chunk;
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OrchestratorStage {
@@ -40,13 +41,14 @@ pub(crate) struct Orchestrator {
 impl Orchestrator {
     pub async fn new(
         tx: AppEventSender,
+        cwd: &Path,
         base: String,
         reason: String,
         limits: ChunkLimits,
         batch_prompt_tmpl: &'static str,
         consolidation_prompt_tmpl: &'static str,
     ) -> anyhow::Result<Self> {
-        let rows = collect_branch_numstat(&base).await.unwrap_or_default();
+        let rows = collect_branch_numstat(cwd, &base).await.unwrap_or_default();
         let batches = score_and_chunk(rows, limits);
         Ok(Self {
             tx,

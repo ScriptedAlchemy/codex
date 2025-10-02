@@ -1991,12 +1991,13 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) async fn start_deep_review_against_base(&mut self, _cwd: &Path, base: &str) {
+    pub(crate) async fn start_deep_review_against_base(&mut self, cwd: &Path, base: &str) {
         self.review_branch_orchestrator = None;
         let limits = default_deep_review_chunk_limits();
         let reason = format!("base branch '{base}'");
         match Orchestrator::new(
             self.app_event_tx.clone(),
+            cwd,
             base.to_string(),
             reason,
             limits,
