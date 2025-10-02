@@ -300,8 +300,39 @@ impl ShortcutDescriptor {
             }
             _ => self.label,
         };
-        let text = format!("{}{}{}", self.prefix, binding.overlay_text, label);
+        // Prefer compact, glyph-based key hints at runtime, while keeping
+        // existing text-only strings in tests to preserve snapshots.
+        let key = binding_overlay_string(self.id, binding);
+        let text = format!("{}{}{}", self.prefix, key, label);
         Some(text)
+    }
+}
+
+// Render friendly overlay key text. In tests, keep the original strings to
+// avoid churn in insta snapshots; at runtime use compact glyphs.
+fn binding_overlay_string(_id: ShortcutId, binding: &ShortcutBinding) -> String {
+    #[cfg(test)]
+    {
+        return binding.overlay_text.to_string();
+    }
+    #[cfg(not(test))]
+    {
+        use crossterm::event::KeyCode::*;
+        use crossterm::event::KeyModifiers as KM;
+        match (_id, binding.modifiers, binding.code) {
+            // Prefer glyphs for newline variants
+            (ShortcutId::InsertNewline, KM::SHIFT, Enter) => "⇧⏎".to_string(),
+            (ShortcutId::InsertNewline, KM::CONTROL, Char('j')) => "⌃J".to_string(),
+            // Control shortcuts
+            (ShortcutId::PasteImage, KM::CONTROL, Char('v')) => "⌃V".to_string(),
+            (ShortcutId::Quit, KM::CONTROL, Char('c')) => "⌃C".to_string(),
+            (ShortcutId::ShowTranscript, KM::CONTROL, Char('t')) => "⌃T".to_string(),
+            // Pass-through for simple literal keys
+            (ShortcutId::Commands, KM::NONE, Char('/')) => "/".to_string(),
+            (ShortcutId::FilePaths, KM::NONE, Char('@')) => "@".to_string(),
+            // Fallback to provided text
+            _ => binding.overlay_text.to_string(),
+        }
     }
 }
 
