@@ -296,7 +296,7 @@ async fn helpers_are_available_and_do_not_panic() {
 }
 
 // --- Helpers for tests that need direct construction and event draining ---
-fn make_chatwidget_manual() -> (
+pub(crate) fn make_chatwidget_manual() -> (
     ChatWidget,
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
@@ -342,6 +342,7 @@ fn make_chatwidget_manual() -> (
         ghost_snapshots: Vec::new(),
         ghost_snapshots_disabled: false,
         needs_final_message_separator: false,
+        review_branch_orchestrator: None,
         last_rendered_width: std::cell::Cell::new(None),
     };
     (widget, rx, op_rx)
@@ -710,7 +711,8 @@ fn review_popup_custom_prompt_action_sends_event() {
     // Open the preset selection popup
     chat.open_review_popup();
 
-    // Move selection down to the fourth item: "Custom review instructions"
+    // Move selection down to the fifth item: "Custom review instructions"
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -905,7 +907,8 @@ async fn review_branch_picker_escape_navigates_back_then_dismisses() {
 
     // Open the branch picker submenu (child view). Using a temp cwd with no git repo is fine.
     let cwd = std::env::temp_dir();
-    chat.show_review_branch_picker(&cwd).await;
+    chat.show_review_branch_picker(&cwd, super::ReviewBranchMode::Simple)
+        .await;
 
     // Verify child view header.
     let header = render_bottom_first_row(&chat, 60);

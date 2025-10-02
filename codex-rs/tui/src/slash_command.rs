@@ -104,19 +104,7 @@ fn beta_features_enabled() -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::str::FromStr;
+mod tests;
 
-    #[test]
-    fn pr_checks_command_is_registered() {
-        let command = SlashCommand::from_str("pr-checks")
-            .expect("/pr-checks should parse into a slash command");
-        assert_eq!(command, SlashCommand::PrChecks);
-
-        assert!(built_in_slash_commands()
-            .into_iter()
-            .map(|(name, _)| name)
-            .any(|name| name == "pr-checks"));
-    }
-}
+#[cfg(test)]
+mod review_command_tests;

@@ -56,6 +56,7 @@ use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
+use tracing::error;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -81,6 +82,9 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PatchEventType;
 use crate::markdown::append_markdown;
+use crate::review_branch::chunker::ChunkLimits;
+use crate::review_branch::orchestrator::Orchestrator;
+use crate::review_branch::orchestrator::OrchestratorStage;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::text_formatting::truncate_text;
@@ -113,6 +117,25 @@ use codex_git_tooling::create_ghost_commit;
 use codex_git_tooling::restore_ghost_commit;
 
 const MAX_TRACKED_GHOST_COMMITS: usize = 20;
+
+const DEEP_REVIEW_BATCH_PROMPT: &str = include_str!("prompt_for_review_branch_batch_command.md");
+const DEEP_REVIEW_CONSOLIDATION_PROMPT: &str =
+    include_str!("prompt_for_review_branch_consolidation.md");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewBranchMode {
+    Simple,
+    Deep,
+}
+
+fn default_deep_review_chunk_limits() -> ChunkLimits {
+    ChunkLimits {
+        small_files_cap: 25,
+        large_files_cap: 5,
+        large_file_threshold_lines: 400,
+        max_lines: 800,
+    }
+}
 
 // Track information about an in-flight exec command.
 struct RunningCommand {
@@ -256,6 +279,9 @@ pub(crate) struct ChatWidget {
     ghost_snapshots_disabled: bool,
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
+
+    // State for an in-flight deep branch review orchestrator, if any.
+    review_branch_orchestrator: Option<Orchestrator>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
 }
@@ -925,6 +951,7 @@ impl ChatWidget {
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
+            review_branch_orchestrator: None,
             last_rendered_width: std::cell::Cell::new(None),
         }
     }
@@ -988,6 +1015,7 @@ impl ChatWidget {
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
+            review_branch_orchestrator: None,
             last_rendered_width: std::cell::Cell::new(None),
         }
     }
@@ -1461,12 +1489,41 @@ impl ChatWidget {
     }
 
     fn on_exited_review_mode(&mut self, review: ExitedReviewModeEvent) {
-        // Leave review mode; if output is present, flush pending stream + show results.
-        if let Some(output) = review.review_output {
-            self.flush_answer_stream_with_separator();
-            self.flush_interrupt_queue();
-            self.flush_active_cell();
+        self.flush_answer_stream_with_separator();
+        self.flush_interrupt_queue();
+        self.flush_active_cell();
 
+        let mut skip_output = false;
+
+        if let Some(orchestrator) = self.review_branch_orchestrator.as_mut() {
+            if let Some(output) = review.review_output.as_ref() {
+                match orchestrator.stage() {
+                    OrchestratorStage::Batching => {
+                        orchestrator.on_batch_result(output);
+                        if orchestrator.stage() != OrchestratorStage::Done {
+                            skip_output = true;
+                        }
+                    }
+                    OrchestratorStage::Consolidation => {
+                        orchestrator.on_consolidation_result(output);
+                        self.review_branch_orchestrator = None;
+                    }
+                    OrchestratorStage::Done => {
+                        self.review_branch_orchestrator = None;
+                    }
+                }
+            } else {
+                self.review_branch_orchestrator = None;
+            }
+        }
+
+        if skip_output {
+            self.is_review_mode = false;
+            self.request_redraw();
+            return;
+        }
+
+        if let Some(output) = review.review_output {
             if output.findings.is_empty() {
                 let explanation = output.overall_explanation.trim().to_string();
                 if explanation.is_empty() {
@@ -1823,6 +1880,20 @@ impl ChatWidget {
         });
 
         items.push(SelectionItem {
+            name: "Deep review against a base branch".to_string(),
+            description: Some("multi-pass orchestrated".into()),
+            is_current: false,
+            actions: vec![Box::new({
+                let cwd = self.config.cwd.clone();
+                move |tx| {
+                    tx.send(AppEvent::OpenDeepReviewBranchPicker(cwd.clone()));
+                }
+            })],
+            dismiss_on_select: false,
+            search_value: None,
+        });
+
+        items.push(SelectionItem {
             name: "Review uncommitted changes".to_string(),
             description: None,
             is_current: false,
@@ -1874,42 +1945,96 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) async fn show_review_branch_picker(&mut self, cwd: &Path) {
+    pub(crate) async fn show_review_branch_picker(&mut self, cwd: &Path, mode: ReviewBranchMode) {
         let branches = local_git_branches(cwd).await;
         let current_branch = current_branch_name(cwd)
             .await
             .unwrap_or_else(|| "(detached HEAD)".to_string());
         let mut items: Vec<SelectionItem> = Vec::with_capacity(branches.len());
+        let cwd_owned = cwd.to_path_buf();
 
         for option in branches {
             let branch = option.clone();
+            let branch_for_action = branch.clone();
+            let action: SelectionAction = match mode {
+                ReviewBranchMode::Simple => Box::new(move |tx3: &AppEventSender| {
+                    tx3.send(AppEvent::CodexOp(Op::Review {
+                        review_request: ReviewRequest {
+                            prompt: format!(
+                                "Review the code changes against the base branch '{branch_for_action}'. Start by finding the merge diff between the current branch and {branch_for_action}'s upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \"{branch_for_action}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes we would merge into the {branch_for_action} branch. Provide prioritized, actionable findings."
+                            ),
+                            user_facing_hint: format!("changes against '{branch_for_action}'"),
+                        },
+                    }));
+                }),
+                ReviewBranchMode::Deep => {
+                    let cwd = cwd_owned.clone();
+                    Box::new(move |tx3: &AppEventSender| {
+                        tx3.send(AppEvent::StartDeepReviewAgainstBase {
+                            cwd: cwd.clone(),
+                            base: branch_for_action.clone(),
+                        });
+                    })
+                }
+            };
             items.push(SelectionItem {
                 name: format!("{current_branch} -> {branch}"),
                 description: None,
                 is_current: false,
-                actions: vec![Box::new(move |tx3: &AppEventSender| {
-                    tx3.send(AppEvent::CodexOp(Op::Review {
-                        review_request: ReviewRequest {
-                            prompt: format!(
-                                "Review the code changes against the base branch '{branch}'. Start by finding the merge diff between the current branch and {branch}'s upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \"{branch}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes we would merge into the {branch} branch. Provide prioritized, actionable findings."
-                            ),
-                            user_facing_hint: format!("changes against '{branch}'"),
-                        },
-                    }));
-                })],
+                actions: vec![action],
                 dismiss_on_select: true,
                 search_value: Some(option),
             });
         }
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: "Select a base branch".to_string(),
+            title: match mode {
+                ReviewBranchMode::Simple => "Select a base branch".to_string(),
+                ReviewBranchMode::Deep => "Select a base branch for deep review".to_string(),
+            },
             footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
             items,
             is_searchable: true,
             search_placeholder: Some("Type to search branches".to_string()),
             ..Default::default()
         });
+    }
+
+    pub(crate) async fn start_deep_review_against_base(&mut self, _cwd: &Path, base: &str) {
+        self.review_branch_orchestrator = None;
+        let limits = default_deep_review_chunk_limits();
+        let reason = format!("base branch '{base}'");
+        match Orchestrator::new(
+            self.app_event_tx.clone(),
+            base.to_string(),
+            reason,
+            limits,
+            DEEP_REVIEW_BATCH_PROMPT,
+            DEEP_REVIEW_CONSOLIDATION_PROMPT,
+        )
+        .await
+        {
+            Ok(mut orchestrator) => {
+                if !orchestrator.has_batches() {
+                    self.add_info_message(
+                        format!("No non-trivial changes detected relative to {base}."),
+                        None,
+                    );
+                    return;
+                }
+
+                orchestrator.start();
+                self.review_branch_orchestrator = Some(orchestrator);
+            }
+            Err(err) => {
+                error!(
+                    error = %err,
+                    base,
+                    "failed to start deep review orchestrator"
+                );
+                self.add_error_message(format!("Failed to start deep review: {err}"));
+            }
+        }
     }
 
     pub(crate) async fn show_review_commit_picker(&mut self, cwd: &Path) {
@@ -2136,6 +2261,57 @@ fn extract_first_bold(s: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+pub(crate) fn show_review_branch_picker_with_entries(
+    chat: &mut ChatWidget,
+    mode: ReviewBranchMode,
+    current_branch: &str,
+    branches: Vec<String>,
+) {
+    let mut items: Vec<SelectionItem> = Vec::with_capacity(branches.len());
+    for branch in branches {
+        let branch_for_action = branch.clone();
+        let action: SelectionAction = match mode {
+            ReviewBranchMode::Simple => Box::new(move |tx3: &AppEventSender| {
+                tx3.send(AppEvent::CodexOp(Op::Review {
+                    review_request: ReviewRequest {
+                        prompt: format!(
+                            "Review the code changes against the base branch '{branch_for_action}'. Start by finding the merge diff between the current branch and {branch_for_action}'s upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \"{branch_for_action}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes we would merge into the {branch_for_action} branch. Provide prioritized, actionable findings."
+                        ),
+                        user_facing_hint: format!("changes against '{branch_for_action}'"),
+                    },
+                }));
+            }),
+            ReviewBranchMode::Deep => Box::new(move |tx3: &AppEventSender| {
+                tx3.send(AppEvent::StartDeepReviewAgainstBase {
+                    cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                    base: branch_for_action.clone(),
+                });
+            }),
+        };
+        items.push(SelectionItem {
+            name: format!("{current_branch} -> {branch}"),
+            description: None,
+            is_current: false,
+            actions: vec![action],
+            dismiss_on_select: true,
+            search_value: Some(branch),
+        });
+    }
+
+    chat.bottom_pane.show_selection_view(SelectionViewParams {
+        title: match mode {
+            ReviewBranchMode::Simple => "Select a base branch".to_string(),
+            ReviewBranchMode::Deep => "Select a base branch for deep review".to_string(),
+        },
+        footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
+        items,
+        is_searchable: true,
+        search_placeholder: Some("Type to search branches".to_string()),
+        ..Default::default()
+    });
+}
+
+#[cfg(test)]
 pub(crate) fn show_review_commit_picker_with_entries(
     chat: &mut ChatWidget,
     entries: Vec<codex_core::git_info::CommitLogEntry>,
@@ -2180,3 +2356,6 @@ pub(crate) fn show_review_commit_picker_with_entries(
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod review_popup_deep_tests;
