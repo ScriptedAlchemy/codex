@@ -7,6 +7,11 @@ use std::collections::HashMap;
 
 use crate::model_family::ModelFamily;
 use crate::plan_tool::PLAN_TOOL;
+use crate::subagent_tools::check_inbox_tool;
+use crate::subagent_tools::create_subagent_tool;
+use crate::subagent_tools::end_subagent_tool;
+use crate::subagent_tools::list_subagents_tool;
+use crate::subagent_tools::reply_to_subagent_tool;
 use crate::tool_apply_patch::ApplyPatchToolType;
 use crate::tool_apply_patch::create_apply_patch_freeform_tool;
 use crate::tool_apply_patch::create_apply_patch_json_tool;
@@ -145,7 +150,7 @@ impl From<JsonSchema> for AdditionalProperties {
 /// Generic JSON‑Schema subset needed for our tool definitions
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
-pub(crate) enum JsonSchema {
+pub enum JsonSchema {
     Boolean {
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
@@ -546,6 +551,13 @@ pub(crate) fn get_openai_tools(
     if config.include_view_image_tool {
         tools.push(create_view_image_tool());
     }
+
+    // Register subagent tools so the primary agent can manage async subagents.
+    tools.push(OpenAiTool::Function(create_subagent_tool()));
+    tools.push(OpenAiTool::Function(list_subagents_tool()));
+    tools.push(OpenAiTool::Function(check_inbox_tool()));
+    tools.push(OpenAiTool::Function(reply_to_subagent_tool()));
+    tools.push(OpenAiTool::Function(end_subagent_tool()));
     if let Some(mcp_tools) = mcp_tools {
         // Ensure deterministic ordering to maximize prompt cache hits.
         let mut entries: Vec<(String, mcp_types::Tool)> = mcp_tools.into_iter().collect();
@@ -613,7 +625,17 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "update_plan", "web_search", "view_image"],
+            &[
+                "unified_exec",
+                "update_plan",
+                "web_search",
+                "view_image",
+                "CreateSubagent",
+                "ListSubagents",
+                "CheckInbox",
+                "ReplyToSubagent",
+                "EndSubagent",
+            ],
         );
     }
 
@@ -633,7 +655,17 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "update_plan", "web_search", "view_image"],
+            &[
+                "unified_exec",
+                "update_plan",
+                "web_search",
+                "view_image",
+                "CreateSubagent",
+                "ListSubagents",
+                "CheckInbox",
+                "ReplyToSubagent",
+                "EndSubagent",
+            ],
         );
     }
 
@@ -693,12 +725,17 @@ mod tests {
                 "unified_exec",
                 "web_search",
                 "view_image",
+                "CreateSubagent",
+                "ListSubagents",
+                "CheckInbox",
+                "ReplyToSubagent",
+                "EndSubagent",
                 "test_server/do_something_cool",
             ],
         );
 
         assert_eq!(
-            tools[3],
+            tools[8],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
@@ -933,6 +970,11 @@ mod tests {
             &[
                 "unified_exec",
                 "view_image",
+                "CreateSubagent",
+                "ListSubagents",
+                "CheckInbox",
+                "ReplyToSubagent",
+                "EndSubagent",
                 "test_server/cool",
                 "test_server/do",
                 "test_server/something",
@@ -978,11 +1020,21 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "web_search", "view_image", "dash/search"],
+            &[
+                "unified_exec",
+                "web_search",
+                "view_image",
+                "CreateSubagent",
+                "ListSubagents",
+                "CheckInbox",
+                "ReplyToSubagent",
+                "EndSubagent",
+                "dash/search",
+            ],
         );
 
         assert_eq!(
-            tools[3],
+            tools[8],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/search".to_string(),
                 parameters: JsonSchema::Object {
@@ -1037,10 +1089,20 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "web_search", "view_image", "dash/paginate"],
+            &[
+                "unified_exec",
+                "web_search",
+                "view_image",
+                "CreateSubagent",
+                "ListSubagents",
+                "CheckInbox",
+                "ReplyToSubagent",
+                "EndSubagent",
+                "dash/paginate",
+            ],
         );
         assert_eq!(
-            tools[3],
+            tools[8],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/paginate".to_string(),
                 parameters: JsonSchema::Object {
@@ -1093,10 +1155,20 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "web_search", "view_image", "dash/tags"],
+            &[
+                "unified_exec",
+                "web_search",
+                "view_image",
+                "CreateSubagent",
+                "ListSubagents",
+                "CheckInbox",
+                "ReplyToSubagent",
+                "EndSubagent",
+                "dash/tags",
+            ],
         );
         assert_eq!(
-            tools[3],
+            tools[8],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/tags".to_string(),
                 parameters: JsonSchema::Object {
@@ -1152,10 +1224,20 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "web_search", "view_image", "dash/value"],
+            &[
+                "unified_exec",
+                "web_search",
+                "view_image",
+                "CreateSubagent",
+                "ListSubagents",
+                "CheckInbox",
+                "ReplyToSubagent",
+                "EndSubagent",
+                "dash/value",
+            ],
         );
         assert_eq!(
-            tools[3],
+            tools[8],
             OpenAiTool::Function(ResponsesApiTool {
                 name: "dash/value".to_string(),
                 parameters: JsonSchema::Object {

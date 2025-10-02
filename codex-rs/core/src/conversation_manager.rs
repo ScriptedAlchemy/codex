@@ -13,6 +13,7 @@ use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::SessionConfiguredEvent;
 use crate::rollout::RolloutRecorder;
+use crate::subagent::SubagentManager;
 use codex_protocol::ConversationId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InitialHistory;
@@ -34,6 +35,7 @@ pub struct NewConversation {
 /// maintaining them in memory.
 pub struct ConversationManager {
     conversations: Arc<RwLock<HashMap<ConversationId, Arc<CodexConversation>>>>,
+    subagent_managers: Arc<RwLock<HashMap<ConversationId, Arc<SubagentManager>>>>,
     auth_manager: Arc<AuthManager>,
 }
 
@@ -41,6 +43,7 @@ impl ConversationManager {
     pub fn new(auth_manager: Arc<AuthManager>) -> Self {
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
+            subagent_managers: Arc::new(RwLock::new(HashMap::new())),
             auth_manager,
         }
     }
@@ -93,6 +96,13 @@ impl ConversationManager {
             .await
             .insert(conversation_id, conversation.clone());
 
+        // Create a subagent manager for this conversation
+        let subagent_manager = Arc::new(SubagentManager::new());
+        self.subagent_managers
+            .write()
+            .await
+            .insert(conversation_id, subagent_manager);
+
         Ok(NewConversation {
             conversation_id,
             conversation,
@@ -125,6 +135,18 @@ impl ConversationManager {
         self.finalize_spawn(codex, conversation_id).await
     }
 
+    /// Get the subagent manager for a conversation
+    pub async fn get_subagent_manager(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> CodexResult<Arc<SubagentManager>> {
+        let managers = self.subagent_managers.read().await;
+        managers
+            .get(conversation_id)
+            .cloned()
+            .ok_or_else(|| CodexErr::ConversationNotFound(*conversation_id))
+    }
+
     /// Removes the conversation from the manager's internal map, though the
     /// conversation is stored as `Arc<CodexConversation>`, it is possible that
     /// other references to it exist elsewhere. Returns the conversation if the
@@ -133,6 +155,7 @@ impl ConversationManager {
         &self,
         conversation_id: &ConversationId,
     ) -> Option<Arc<CodexConversation>> {
+        self.subagent_managers.write().await.remove(conversation_id);
         self.conversations.write().await.remove(conversation_id)
     }
 

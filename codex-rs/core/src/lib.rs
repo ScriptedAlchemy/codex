@@ -77,6 +77,8 @@ pub use rollout::list::ConversationsPage;
 pub use rollout::list::Cursor;
 mod function_tool;
 mod state;
+pub mod subagent;
+pub mod subagent_tools;
 mod tasks;
 mod user_notification;
 pub mod util;

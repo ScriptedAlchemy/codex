@@ -1463,6 +1463,12 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(crate::app_event::AppEvent::ConversationHistory(ev));
             }
+            // Subagent events: ignore for now; no UI surface yet.
+            EventMsg::SubagentCreated(_)
+            | EventMsg::SubagentsListResponse(_)
+            | EventMsg::InboxResponse(_)
+            | EventMsg::SubagentReplySuccess(_)
+            | EventMsg::SubagentEnded(_) => {}
             EventMsg::EnteredReviewMode(review_request) => {
                 self.on_entered_review_mode(review_request)
             }
