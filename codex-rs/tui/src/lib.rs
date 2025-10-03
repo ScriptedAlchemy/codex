@@ -9,6 +9,7 @@ use codex_app_server_protocol::AuthMode;
 use codex_core::AuthManager;
 use codex_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
 use codex_core::CodexAuth;
+use codex_core::INTERACTIVE_SESSION_SOURCES;
 use codex_core::RolloutRecorder;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -163,7 +164,7 @@ pub async fn run_main(
         // Load configuration and support CLI overrides.
 
         #[allow(clippy::print_stderr)]
-        match Config::load_with_cli_overrides(cli_kv_overrides.clone(), overrides) {
+        match Config::load_with_cli_overrides(cli_kv_overrides.clone(), overrides).await {
             Ok(config) => config,
             Err(err) => {
                 eprintln!("Error loading configuration: {err}");
@@ -183,7 +184,7 @@ pub async fn run_main(
             }
         };
 
-        match load_config_as_toml_with_cli_overrides(&codex_home, cli_kv_overrides) {
+        match load_config_as_toml_with_cli_overrides(&codex_home, cli_kv_overrides).await {
             Ok(config_toml) => config_toml,
             Err(err) => {
                 eprintln!("Error loading config.toml: {err}");
@@ -395,7 +396,14 @@ async fn run_ratatui_app(
             }
         }
     } else if cli.resume_last {
-        match RolloutRecorder::list_conversations(&config.codex_home, 1, None).await {
+        match RolloutRecorder::list_conversations(
+            &config.codex_home,
+            1,
+            None,
+            INTERACTIVE_SESSION_SOURCES,
+        )
+        .await
+        {
             Ok(page) => page
                 .items
                 .first()
