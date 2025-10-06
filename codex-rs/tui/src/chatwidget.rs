@@ -2007,6 +2007,7 @@ impl ChatWidget {
         items.push(SelectionItem {
             name: "Deep review against a base branch".to_string(),
             description: Some("multi-pass orchestrated".into()),
+            display_shortcut: None,
             is_current: false,
             actions: vec![Box::new({
                 let cwd = self.config.cwd.clone();
@@ -2410,6 +2411,7 @@ pub(crate) fn show_review_branch_picker_with_entries(
         items.push(SelectionItem {
             name: format!("{current_branch} -> {branch}"),
             description: None,
+            display_shortcut: None,
             is_current: false,
             actions: vec![action],
             dismiss_on_select: true,
@@ -2423,7 +2425,7 @@ pub(crate) fn show_review_branch_picker_with_entries(
     };
     chat.bottom_pane.show_selection_view(SelectionViewParams {
         title: Some(title),
-        footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
+        footer_hint: Some(standard_popup_hint_line()),
         items,
         is_searchable: true,
         search_placeholder: Some("Type to search branches".to_string()),

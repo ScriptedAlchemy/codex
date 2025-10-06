@@ -76,6 +76,7 @@ pub async fn run(opts: ProxyCommand) -> anyhow::Result<()> {
         .parse_overrides()
         .map_err(|e| anyhow::anyhow!(e))?;
     let config = Config::load_with_cli_overrides(cli_overrides, Default::default())
+        .await
         .context("load config")?;
 
     // Upstream base URL: prefer provider.base_url, else default to OpenAI official
