@@ -230,13 +230,14 @@ fn exec_resume_preserves_cli_configuration_overrides() -> anyhow::Result<()> {
     assert!(output.status.success(), "resume run failed: {output:?}");
 
     let stderr = String::from_utf8(output.stderr)?;
+    let stderr_plain = strip_ansi(&stderr);
     assert!(
-        stderr.contains("model: gpt-5-high"),
-        "stderr missing model override: {stderr}"
+        stderr_plain.contains("model: gpt-5-high"),
+        "stderr missing model override: {stderr_plain}"
     );
     assert!(
-        stderr.contains("sandbox: workspace-write"),
-        "stderr missing sandbox override: {stderr}"
+        stderr_plain.contains("sandbox: workspace-write"),
+        "stderr missing sandbox override: {stderr_plain}"
     );
 
     let resumed_path = find_session_file_containing_marker(&sessions_dir, &marker2)
@@ -247,4 +248,22 @@ fn exec_resume_preserves_cli_configuration_overrides() -> anyhow::Result<()> {
     assert!(content.contains(&marker));
     assert!(content.contains(&marker2));
     Ok(())
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut iter = input.chars().peekable();
+    while let Some(ch) = iter.next() {
+        if ch == '\u{1b}' && matches!(iter.peek(), Some('[')) {
+            iter.next();
+            for terminator in iter.by_ref() {
+                if ('@'..='~').contains(&terminator) {
+                    break;
+                }
+            }
+            continue;
+        }
+        output.push(ch);
+    }
+    output
 }

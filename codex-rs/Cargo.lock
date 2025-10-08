@@ -6428,7 +6428,7 @@ checksum = "adc5f880ad8d8f94e88cb81c3557024cf1a8b75e3b504c50481ed4f5a6006ff3"
 dependencies = [
  "regex",
  "streaming-iterator",
- "thiserror 2.0.16",
+ "thiserror 2.0.17",
  "tree-sitter",
 ]
 
