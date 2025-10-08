@@ -28,7 +28,7 @@ use crate::seatbelt::spawn_command_under_seatbelt;
 use crate::spawn::StdioPolicy;
 use crate::spawn::spawn_child_async;
 
-const DEFAULT_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 
 // Hardcode these since it does not seem worth including the libc crate just
 // for these.
