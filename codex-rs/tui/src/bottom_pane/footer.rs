@@ -317,7 +317,7 @@ impl ShortcutDescriptor {
 fn glyphs_enabled() -> bool {
     #[cfg(test)]
     {
-        return std::env::var("CODEX_TUI_TEST_FORCE_GLYPHS").ok().as_deref() == Some("1");
+        std::env::var("CODEX_TUI_TEST_FORCE_GLYPHS").ok().as_deref() == Some("1")
     }
     #[cfg(not(test))]
     {
