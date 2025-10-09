@@ -10,6 +10,7 @@ mod event_processor_with_human_output;
 pub mod event_processor_with_jsonl_output;
 pub mod exec_events;
 
+use anyhow::Context;
 pub use cli::Cli;
 use codex_core::AuthManager;
 use codex_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
@@ -31,10 +32,14 @@ use event_processor_with_human_output::EventProcessorWithHumanOutput;
 use event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use serde_json::Value;
+use std::io::ErrorKind;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use supports_color::Stream;
+use tokio::process::Command;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -46,6 +51,18 @@ use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 use codex_core::default_client::set_default_originator;
 use codex_core::find_conversation_path_by_id_str;
+
+const OPENCODE_MODEL_ID: &str = "anthropic/claude-sonnet-4-5-20250929";
+const MAX_SECTION_LEN: usize = 120_000;
+
+struct OpencodeOutcome {
+    status: std::process::ExitStatus,
+    duration: Duration,
+    stdout: String,
+    stderr: String,
+    git_status: Option<String>,
+    git_diff: Option<String>,
+}
 
 pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     if let Err(err) = set_default_originator("codex_exec".to_string()) {
@@ -69,6 +86,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         prompt,
         output_schema: output_schema_path,
         include_plan_tool,
+        allow_opencode,
         config_overrides,
     } = cli;
 
@@ -80,7 +98,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         None => prompt,
     };
 
-    let prompt = match prompt_arg {
+    let mut prompt = match prompt_arg {
         Some(p) if p != "-" => p,
         // Either `-` was passed or no positional arg.
         maybe_dash => {
@@ -113,6 +131,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             buffer
         }
     };
+    let original_prompt = prompt.clone();
 
     let output_schema = load_output_schema(output_schema_path);
 
@@ -242,6 +261,23 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     if !skip_git_repo_check && get_git_repo_root(&default_cwd).is_none() {
         eprintln!("Not inside a trusted directory and --skip-git-repo-check was not specified.");
         std::process::exit(1);
+    }
+
+    if allow_opencode {
+        match try_run_opencode(&default_cwd, &prompt).await {
+            Ok(Some(outcome)) => {
+                eprintln!(
+                    "Delegated task to opencode (model {OPENCODE_MODEL_ID}). Reviewing results before continuing with Codex."
+                );
+                prompt = build_opencode_review_prompt(&original_prompt, &outcome);
+            }
+            Ok(None) => {
+                eprintln!("opencode CLI not found on PATH; continuing without delegation.");
+            }
+            Err(err) => {
+                eprintln!("Failed to delegate to opencode (continuing without delegation): {err}");
+            }
+        }
     }
 
     let auth_manager = AuthManager::shared(config.codex_home.clone(), true);
@@ -424,5 +460,119 @@ fn load_output_schema(path: Option<PathBuf>) -> Option<Value> {
             );
             std::process::exit(1);
         }
+    }
+}
+
+async fn try_run_opencode(cwd: &Path, prompt: &str) -> anyhow::Result<Option<OpencodeOutcome>> {
+    let mut cmd = Command::new("opencode");
+    cmd.arg("run")
+        .arg("--model")
+        .arg(OPENCODE_MODEL_ID)
+        .arg(prompt)
+        .current_dir(cwd)
+        .env("NO_COLOR", "1");
+
+    let start = std::time::Instant::now();
+    let output = match cmd.output().await {
+        Ok(output) => output,
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(err).context("launching opencode process");
+        }
+    };
+    let duration = start.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let git_status = capture_git_output(cwd, &["status", "--short"]).await?;
+    let git_diff = capture_git_output(cwd, &["diff"]).await?;
+
+    Ok(Some(OpencodeOutcome {
+        status: output.status,
+        duration,
+        stdout,
+        stderr,
+        git_status,
+        git_diff,
+    }))
+}
+
+async fn capture_git_output(cwd: &Path, args: &[&str]) -> anyhow::Result<Option<String>> {
+    let mut cmd = Command::new("git");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    let output = match cmd.current_dir(cwd).env("NO_COLOR", "1").output().await {
+        Ok(output) => output,
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(err).context(format!("running git {}", args.join(" ")));
+        }
+    };
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(text))
+}
+
+fn build_opencode_review_prompt(original_prompt: &str, outcome: &OpencodeOutcome) -> String {
+    let status = format_exit_status(outcome.status);
+    let duration = outcome.duration.as_secs_f32();
+    let stdout = truncate_section(&outcome.stdout);
+    let stderr = truncate_section(&outcome.stderr);
+    let git_status = outcome
+        .git_status
+        .as_deref()
+        .map(truncate_section)
+        .unwrap_or_else(|| "No git status output.".to_string());
+    let git_diff = outcome
+        .git_diff
+        .as_deref()
+        .map(truncate_section)
+        .unwrap_or_else(|| "No diff produced.".to_string());
+
+    format!(
+        "Codex delegated the user's instructions to the opencode CLI before continuing.\n\
+Please review the results below, confirm that the original instructions are fully addressed, \
+and make any additional fixes that are still required. You may use Codex's standard tools \
+(including apply_patch) after this review if changes are incomplete.\n\n\
+Original instructions:\n{original_prompt}\n\n\
+Opencode invocation details:\n\
+- command: `opencode run --model {OPENCODE_MODEL_ID}`\n\
+- exit status: {status}\n\
+- duration: {duration:.1}s\n\n\
+Stdout (truncated to {MAX_SECTION_LEN} chars):\n```text\n{stdout}\n```\n\
+Stderr (truncated to {MAX_SECTION_LEN} chars):\n```text\n{stderr}\n```\n\
+Git status after opencode:\n```text\n{git_status}\n```\n\
+Git diff after opencode:\n```diff\n{git_diff}\n```\n"
+    )
+}
+
+fn truncate_section(content: &str) -> String {
+    if content.len() <= MAX_SECTION_LEN {
+        return content.trim_end().to_string();
+    }
+    let mut end = MAX_SECTION_LEN;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = content[..end].trim_end().to_string();
+    truncated.push_str("\n[truncated]");
+    truncated
+}
+
+fn format_exit_status(status: std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        code.to_string()
+    } else {
+        "terminated by signal".to_string()
     }
 }
