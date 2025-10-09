@@ -102,6 +102,7 @@ use crate::state::SessionServices;
 use crate::tasks::CompactTask;
 use crate::tasks::RegularTask;
 use crate::tasks::ReviewTask;
+use crate::tasks::StagedCompactTask;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::format_exec_output_str;
@@ -1449,6 +1450,15 @@ async fn submission_loop(
                     sess.spawn_task(Arc::clone(&turn_context), sub.id, items, CompactTask)
                         .await;
                 }
+            }
+            Op::StagedCompact => {
+                sess.spawn_task(
+                    Arc::clone(&turn_context),
+                    sub.id,
+                    Vec::new(),
+                    StagedCompactTask,
+                )
+                .await;
             }
             Op::Shutdown => {
                 sess.abort_all_tasks(TurnAbortReason::Interrupted).await;

@@ -18,6 +18,7 @@ pub enum SlashCommand {
     New,
     Init,
     Compact,
+    StagedCompact,
     Undo,
     Diff,
     PrChecks,
@@ -37,6 +38,9 @@ impl SlashCommand {
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
+            SlashCommand::StagedCompact => {
+                "hierarchically summarize older history while keeping the latest details"
+            }
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Undo => "restore the workspace to the last Codex snapshot",
             SlashCommand::Quit => "exit Codex",
@@ -65,6 +69,7 @@ impl SlashCommand {
             SlashCommand::New
             | SlashCommand::Init
             | SlashCommand::Compact
+            | SlashCommand::StagedCompact
             | SlashCommand::Undo
             | SlashCommand::Model
             | SlashCommand::Approvals

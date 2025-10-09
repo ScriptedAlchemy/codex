@@ -3,6 +3,7 @@ use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
 use codex_core::NewConversation;
 use codex_core::built_in_model_providers;
+use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
@@ -43,6 +44,9 @@ const CONTEXT_LIMIT_MESSAGE: &str =
     "Your input exceeds the context window of this model. Please adjust your input and try again.";
 const DUMMY_FUNCTION_NAME: &str = "unsupported_tool";
 const DUMMY_CALL_ID: &str = "call-multi-auto";
+const STAGED_SEGMENT_SUMMARY: &str = "SEGMENT_SUMMARY";
+const POST_COMPACT_REPLY: &str = "POST_COMPACT_REPLY";
+const POST_COMPACT_USER: &str = "post-compact follow-up";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn summarize_context_three_requests_and_instructions() {
@@ -747,6 +751,205 @@ async fn manual_compact_retries_after_context_window_error() {
     } else {
         panic!("expected non-empty compact inputs");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_compact_keeps_recent_items_verbatim() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+
+    let user_inputs = [
+        "plan step 1",
+        "plan step 2",
+        "plan step 3",
+        "plan step 4",
+        "plan step 5",
+    ];
+    let assistant_responses = [
+        "ack step 1",
+        "ack step 2",
+        "ack step 3",
+        "ack step 4",
+        "ack step 5",
+    ];
+
+    let mut responses = Vec::new();
+    for (idx, reply) in assistant_responses.iter().enumerate() {
+        responses.push(sse(vec![
+            ev_assistant_message(&format!("reply-{idx}"), reply),
+            ev_completed(&format!("resp-{idx}")),
+        ]));
+    }
+
+    // Summarization call for staged compact.
+    responses.push(sse(vec![
+        ev_assistant_message("segment-summary", STAGED_SEGMENT_SUMMARY),
+        ev_completed("segment-summary-complete"),
+    ]));
+
+    // Follow-up turn after compaction.
+    responses.push(sse(vec![
+        ev_assistant_message("post-compact", POST_COMPACT_REPLY),
+        ev_completed("post-compact-complete"),
+    ]));
+
+    let request_log = mount_sse_sequence(&server, responses).await;
+
+    let model_provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+
+    let home = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&home);
+    config.model_provider = model_provider;
+    config.model_auto_compact_token_limit = Some(200_000);
+    let NewConversation {
+        conversation: codex,
+        ..
+    } = ConversationManager::with_auth(CodexAuth::from_api_key("dummy"))
+        .new_conversation(config)
+        .await
+        .unwrap();
+
+    for input in user_inputs.iter() {
+        codex
+            .submit(Op::UserInput {
+                items: vec![InputItem::Text {
+                    text: (*input).to_string(),
+                }],
+            })
+            .await
+            .unwrap();
+        wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+    }
+
+    codex.submit(Op::StagedCompact).await.unwrap();
+    let agent_event = wait_for_event(&codex, |ev| match ev {
+        EventMsg::AgentMessage(AgentMessageEvent { message }) => {
+            message.contains("Staged compact completed")
+        }
+        _ => false,
+    })
+    .await;
+    let EventMsg::AgentMessage(AgentMessageEvent { message }) = agent_event else {
+        panic!("expected agent message after staged compact");
+    };
+    assert!(
+        message.contains("kept 3 recent item"),
+        "expected message to mention kept items, got {message}"
+    );
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: POST_COMPACT_USER.to_string(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        user_inputs.len() + 2,
+        "expected one request per turn plus staged compact and follow-up"
+    );
+
+    let summary_request = &requests[user_inputs.len()];
+    let summary_body = summary_request.body_json();
+    let summary_input = summary_body
+        .get("input")
+        .and_then(|v| v.as_array())
+        .expect("summary request should contain input array");
+    let summary_text = summary_input
+        .first()
+        .and_then(|item| item.get("content"))
+        .and_then(|content| content.as_array())
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry.get("text"))
+        .and_then(|text| text.as_str())
+        .unwrap_or_default();
+    assert!(
+        summary_text.contains("segment 1/1"),
+        "segment prompt should note the segment position"
+    );
+    assert!(
+        summary_text.contains(user_inputs[0]),
+        "segment prompt should include older transcript content"
+    );
+
+    let final_request = requests.last().unwrap();
+    let final_body = final_request.body_json();
+    let inputs = final_body
+        .get("input")
+        .and_then(|v| v.as_array())
+        .expect("final request should contain input array");
+
+    let mut message_entries: Vec<(String, Vec<String>)> = Vec::new();
+    for item in inputs {
+        if item.get("type").and_then(|v| v.as_str()) == Some("message") {
+            let role = item
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if let Some(content_array) = item.get("content").and_then(|v| v.as_array()) {
+                let mut texts = Vec::new();
+                for entry in content_array {
+                    if let Some(text) = entry.get("text").and_then(|t| t.as_str()) {
+                        texts.push(text.to_string());
+                    }
+                }
+                if !texts.is_empty() {
+                    message_entries.push((role, texts));
+                }
+            }
+        }
+    }
+
+    assert!(
+        message_entries.iter().any(|(role, texts)| {
+            role == "user"
+                && texts.iter().any(|text| {
+                    text.contains("High-level summary") && text.contains(STAGED_SEGMENT_SUMMARY)
+                })
+        }),
+        "final history should include the staged summary bridge"
+    );
+    assert!(
+        message_entries.iter().any(|(role, texts)| {
+            role == "assistant"
+                && texts
+                    .iter()
+                    .any(|text| text.trim() == assistant_responses[3])
+        })
+            && message_entries.iter().any(|(role, texts)| {
+                role == "assistant"
+                    && texts
+                        .iter()
+                        .any(|text| text.trim() == assistant_responses[4])
+            })
+            && message_entries.iter().any(|(role, texts)| {
+                role == "user" && texts.iter().any(|text| text.trim() == user_inputs[4])
+            }),
+        "recent transcript items should remain verbatim"
+    );
+    assert!(
+        !message_entries.iter().any(|(role, texts)| {
+            role == "user" && texts.iter().any(|text| text.trim() == user_inputs[0])
+        }),
+        "older user messages should be summarized away"
+    );
+    assert!(
+        message_entries.iter().any(|(role, texts)| {
+            role == "user" && texts.iter().any(|text| text.trim() == POST_COMPACT_USER)
+        }),
+        "final request should include the follow-up user message"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

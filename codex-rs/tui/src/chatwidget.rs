@@ -1143,6 +1143,10 @@ impl ChatWidget {
                 self.clear_token_usage();
                 self.app_event_tx.send(AppEvent::CodexOp(Op::Compact));
             }
+            SlashCommand::StagedCompact => {
+                self.clear_token_usage();
+                self.app_event_tx.send(AppEvent::CodexOp(Op::StagedCompact));
+            }
             SlashCommand::Review => {
                 self.open_review_popup();
             }
