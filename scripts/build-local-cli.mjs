@@ -8,7 +8,14 @@
  * existing Node wrapper resolves it correctly.
  */
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -61,7 +68,13 @@ async function main() {
   const codexJsDst = path.join(codexJsDstDir, 'codex.js');
   cpSync(codexJsSrc, codexJsDst);
 
-  // 3) Create vendor layout expected by the wrapper and copy the binary
+  // 3) Copy package manifest so Node treats the wrapper as ESM
+  const pkgSrc = path.join(REPO_ROOT, 'codex-cli', 'package.json');
+  const pkgDst = path.join(distDir, 'package.json');
+  const pkgJson = JSON.parse(readFileSync(pkgSrc, 'utf8'));
+  writeFileSync(pkgDst, `${JSON.stringify(pkgJson, null, 2)}\n`);
+
+  // 4) Create vendor layout expected by the wrapper and copy the binary
   const triple = hostTargetTriple();
   const vendorCodexDir = path.join(distDir, 'vendor', triple, 'codex');
   mkdirSync(vendorCodexDir, { recursive: true });
@@ -91,4 +104,3 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
-
