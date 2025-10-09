@@ -1442,6 +1442,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum 0.8.6",
+ "codex-protocol",
  "dirs",
  "futures",
  "keyring",
