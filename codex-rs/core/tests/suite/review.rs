@@ -338,6 +338,96 @@ async fn review_uses_custom_review_model_from_config() {
     server.verify().await;
 }
 
+/// Ensure that trailing effort suffixes are stripped before review requests are sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_sanitizes_review_model_suffixes() {
+    skip_if_no_network!();
+
+    let sse_raw = r#"[
+        {"type":"response.completed", "response": {"id": "__ID__"}}
+    ]"#;
+    let server = start_responses_server_with_sse(sse_raw, 1).await;
+    let codex_home = TempDir::new().unwrap();
+    let codex = new_conversation_for_server(&server, &codex_home, |cfg| {
+        cfg.review_model = "gpt-5-codex high".to_string();
+    })
+    .await;
+
+    codex
+        .submit(Op::Review {
+            review_request: ReviewRequest {
+                prompt: "fall back when review model invalid".to_string(),
+                user_facing_hint: "fallback".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let _entered = wait_for_event(&codex, |ev| matches!(ev, EventMsg::EnteredReviewMode(_))).await;
+    let _closed = wait_for_event(&codex, |ev| {
+        matches!(
+            ev,
+            EventMsg::ExitedReviewMode(ExitedReviewModeEvent {
+                review_output: None
+            })
+        )
+    })
+    .await;
+    let _complete = wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let request = &server.received_requests().await.unwrap()[0];
+    let body = request.body_json::<serde_json::Value>().unwrap();
+    assert_eq!(body["model"].as_str().unwrap(), "gpt-5-codex");
+
+    server.verify().await;
+}
+
+/// Ensure that if the configured review model slug is unknown, we fall back to a
+/// supported chat model rather than sending the unsupported slug to the API.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_falls_back_to_chat_model_when_review_model_unknown() {
+    skip_if_no_network!();
+
+    let sse_raw = r#"[
+        {"type":"response.completed", "response": {"id": "__ID__"}}
+    ]"#;
+    let server = start_responses_server_with_sse(sse_raw, 1).await;
+    let codex_home = TempDir::new().unwrap();
+    let codex = new_conversation_for_server(&server, &codex_home, |cfg| {
+        cfg.model = "gpt-4.1".to_string();
+        cfg.review_model = "totally-unknown-model".to_string();
+    })
+    .await;
+
+    codex
+        .submit(Op::Review {
+            review_request: ReviewRequest {
+                prompt: "fall back when review model unknown".to_string(),
+                user_facing_hint: "fallback".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let _entered = wait_for_event(&codex, |ev| matches!(ev, EventMsg::EnteredReviewMode(_))).await;
+    let _closed = wait_for_event(&codex, |ev| {
+        matches!(
+            ev,
+            EventMsg::ExitedReviewMode(ExitedReviewModeEvent {
+                review_output: None
+            })
+        )
+    })
+    .await;
+    let _complete = wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let request = &server.received_requests().await.unwrap()[0];
+    let body = request.body_json::<serde_json::Value>().unwrap();
+    assert_eq!(body["model"].as_str().unwrap(), "gpt-5-codex");
+
+    server.verify().await;
+}
+
 /// When a review session begins, it must not prepend prior chat history from
 /// the parent session. The request `input` should contain only the review
 /// prompt from the user.
