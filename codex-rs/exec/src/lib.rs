@@ -576,3 +576,144 @@ fn format_exit_status(status: std::process::ExitStatus) -> String {
         "terminated by signal".to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command as StdCommand;
+    use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn try_run_opencode_executes_cli_and_collects_git_changes() {
+        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+        rt.block_on(async {
+            let repo_dir = tempdir().expect("tempdir");
+            let repo_path = repo_dir.path();
+
+            StdCommand::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo_path)
+                .status()
+                .expect("git init");
+
+            fs::write(repo_path.join("notes.txt"), "before\n").expect("write notes");
+            StdCommand::new("git")
+                .args(["add", "notes.txt"])
+                .current_dir(repo_path)
+                .status()
+                .expect("git add");
+            StdCommand::new("git")
+                .args(["commit", "-m", "init"])
+                .env("GIT_AUTHOR_NAME", "Codex")
+                .env("GIT_AUTHOR_EMAIL", "codex@example.com")
+                .env("GIT_COMMITTER_NAME", "Codex")
+                .env("GIT_COMMITTER_EMAIL", "codex@example.com")
+                .current_dir(repo_path)
+                .status()
+                .expect("git commit");
+
+            let bin_dir = tempdir().expect("bin tempdir");
+            let script_path = bin_dir.path().join("opencode");
+            {
+                let mut file = fs::File::create(&script_path).expect("create script");
+                writeln!(file, "#!/usr/bin/env bash").unwrap();
+                writeln!(file, "echo \"delegated stdout\"").unwrap();
+                writeln!(file, "echo \"delegated stderr\" 1>&2").unwrap();
+                writeln!(file, "echo \"after\" > notes.txt").unwrap();
+            }
+            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap();
+
+            let original_path = std::env::var_os("PATH");
+            let mut new_path = std::ffi::OsString::from(bin_dir.path());
+            if let Some(orig) = original_path.clone() {
+                new_path.push(":");
+                new_path.push(orig);
+            }
+            unsafe {
+                std::env::set_var("PATH", &new_path);
+            }
+
+            let outcome = try_run_opencode(repo_path, "delegated prompt")
+                .await
+                .expect("try_run_opencode failed")
+                .expect("opencode not found");
+
+            if let Some(orig) = original_path {
+                unsafe {
+                    std::env::set_var("PATH", orig);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var("PATH");
+                }
+            }
+
+            assert!(
+                outcome.status.success(),
+                "opencode script should exit successfully"
+            );
+            assert!(
+                outcome.stdout.contains("delegated stdout"),
+                "stdout should include delegated output"
+            );
+            assert!(
+                outcome.stderr.contains("delegated stderr"),
+                "stderr should include delegated output"
+            );
+
+            let status_output = outcome
+                .git_status
+                .as_deref()
+                .expect("git status should be captured");
+            assert!(
+                status_output.contains("M notes.txt"),
+                "git status should show modified file, got: {status_output}"
+            );
+
+            let diff_output = outcome
+                .git_diff
+                .as_deref()
+                .expect("git diff should be captured");
+            assert!(
+                diff_output.contains("after"),
+                "git diff should include updated contents, got: {diff_output}"
+            );
+        });
+    }
+
+    #[test]
+    fn truncate_section_trims_and_marks_truncation() {
+        let short = "hello";
+        assert_eq!(truncate_section(short), "hello");
+
+        let long = "a".repeat(MAX_SECTION_LEN + 10);
+        let truncated = truncate_section(&long);
+        assert!(
+            truncated.ends_with("[truncated]"),
+            "expected truncation marker"
+        );
+    }
+
+    #[test]
+    fn format_exit_status_reports_code() {
+        let status = if cfg!(windows) {
+            StdCommand::new("cmd")
+                .args(["/C", "exit", "7"])
+                .status()
+                .expect("cmd exit")
+        } else {
+            StdCommand::new("sh")
+                .args(["-c", "exit 7"])
+                .status()
+                .expect("sh exit")
+        };
+        assert_eq!(format_exit_status(status), "7");
+    }
+}
