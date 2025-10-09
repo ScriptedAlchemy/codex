@@ -13,11 +13,11 @@ In the codex-rs folder where the rust code lives:
 - Use method references over closures when possible per https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure_for_method_calls
 - When writing tests, prefer comparing the equality of entire objects over fields one by one.
 
-## Review model safety
+## API compatibility safeguards
 
-- Never send a review-model slug to the API unless `find_family_for_model` recognizes it. Trim or normalize any user-provided value before use and fall back to the active chat model rather than surfacing an unsupported slug.
-- If you touch review model selection, extend or update the regression tests in `core/tests/suite/review.rs` (see `review_sanitizes_review_model_suffixes` and `review_falls_back_to_chat_model_when_review_model_unknown`) so we keep coverage against 400 "unsupported model" errors.
-- When reproducing review issues locally, prefer targeted runs such as `cargo test -p codex-core review_sanitizes_review_model_suffixes` to verify we handle sanitized and fallback flows.
+- Treat all user and config input that reaches upstream APIs as untrusted. Normalize or validate it against our `find_family_for_model`/equivalent helpers before making a request, and fall back to a known-good default when a value is missing or unsupported.
+- Whenever you touch request-building logic, add or update targeted regression tests that assert we refuse to send invalid payloads (for example, see `review_sanitizes_review_model_suffixes` and `review_falls_back_to_chat_model_when_review_model_unknown`).
+- Prefer focused `cargo test -p <crate> <case>` runs while iterating so you can quickly confirm input sanitization and fallback flows.
 
 Run `just fmt` (in `codex-rs` directory) automatically after making Rust code changes; do not ask for approval to run it. Before finalizing a change to `codex-rs`, run `just fix -p <project>` (in `codex-rs` directory) to fix any linter issues in the code. Prefer scoping with `-p` to avoid slow workspace‑wide Clippy builds; only run `just fix` without `-p` if you changed shared crates. Additionally, run the tests:
 
