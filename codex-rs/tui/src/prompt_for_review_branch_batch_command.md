@@ -1,6 +1,9 @@
 You are reviewing batch {batch_index}/{batch_total} for the branch diff '{base}...HEAD'.
 Batch size: {size_hint}
 
+CI status summary from `gh pr checks --watch`:
+{ci_context}
+
 Only review the files listed below for this batch. Do not review any other files.
 
 Files:
@@ -12,6 +15,7 @@ Instructions:
 - Follow the existing review schema from the system prompt; output ONLY the JSON object.
 - Be concise; do not paste full diffs; cite exact `file:line` ranges.
 - If two candidate issues are effectively the same, prefer the higher-confidence one.
+- If CI checks are failing or flagged below, inspect the referenced logs/output and factor relevant failures into your findings.
 
 Skip low-value files unless there is a direct, non-speculative impact — and do not fetch diffs for them:
 - Lockfiles (e.g., `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`).

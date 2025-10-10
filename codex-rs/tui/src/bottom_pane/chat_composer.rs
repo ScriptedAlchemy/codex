@@ -2177,6 +2177,34 @@ mod tests {
     }
 
     #[test]
+    fn slash_popup_comp_lists_compact_variants_ui() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        type_chars_humanlike(&mut composer, &['/', 'c', 'o', 'm', 'p']);
+
+        let mut terminal = match Terminal::new(TestBackend::new(60, 6)) {
+            Ok(t) => t,
+            Err(e) => panic!("Failed to create terminal: {e}"),
+        };
+        terminal
+            .draw(|f| f.render_widget_ref(composer, f.area()))
+            .unwrap_or_else(|e| panic!("Failed to draw composer: {e}"));
+
+        insta::assert_snapshot!("slash_popup_comp", terminal.backend());
+    }
+
+    #[test]
     fn slash_popup_model_first_for_mo_logic() {
         use super::super::command_popup::CommandItem;
         let (tx, _rx) = unbounded_channel::<AppEvent>();
@@ -2201,6 +2229,55 @@ mod tests {
                 None => panic!("no selected command for '/mo'"),
             },
             _ => panic!("slash popup not active after typing '/mo'"),
+        }
+    }
+
+    #[test]
+    fn slash_popup_comp_includes_staged_compact() {
+        use super::super::command_popup::CommandItem;
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        type_chars_humanlike(&mut composer, &['/', 'c', 'o', 'm', 'p']);
+
+        let ActivePopup::Command(popup) = &composer.active_popup else {
+            panic!("slash popup not active after typing '/comp'");
+        };
+
+        match popup.selected_item() {
+            Some(CommandItem::Builtin(cmd)) => {
+                assert_eq!(cmd.command(), "compact");
+            }
+            Some(CommandItem::UserPrompt(_)) => {
+                panic!("unexpected prompt selected for '/comp'");
+            }
+            None => panic!("no selected command for '/comp'"),
+        }
+
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+        let (_result, _needs_redraw) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        let ActivePopup::Command(popup) = &composer.active_popup else {
+            panic!("slash popup not active after moving selection");
+        };
+        match popup.selected_item() {
+            Some(CommandItem::Builtin(cmd)) => {
+                assert_eq!(cmd.command(), "staged-compact");
+            }
+            Some(CommandItem::UserPrompt(_)) => {
+                panic!("unexpected prompt selected after moving selection for '/comp'");
+            }
+            None => panic!("no selected command after moving selection for '/comp'"),
         }
     }
 

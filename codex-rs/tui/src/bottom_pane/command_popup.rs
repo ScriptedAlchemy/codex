@@ -220,7 +220,9 @@ impl WidgetRef for CommandPopup {
 
 #[cfg(test)]
 mod tests {
+    use super::super::popup_consts::MAX_POPUP_ROWS;
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn filter_includes_init_when_typing_prefix() {
@@ -321,5 +323,39 @@ mod tests {
             !has_collision_prompt,
             "prompt with builtin name should be ignored"
         );
+    }
+
+    #[test]
+    fn typing_slash_lists_staged_compact_in_initial_rows() {
+        let mut popup = CommandPopup::new(Vec::new());
+        popup.on_composer_text_change("/".to_string());
+
+        let items = popup.filtered_items();
+        let first_names: Vec<&str> = items
+            .iter()
+            .take(MAX_POPUP_ROWS)
+            .map(|item| match item {
+                CommandItem::Builtin(cmd) => cmd.command(),
+                CommandItem::UserPrompt(_) => {
+                    panic!("unexpected user prompt in initial slash command rows")
+                }
+            })
+            .collect();
+
+        let required = [
+            "model",
+            "approvals",
+            "review",
+            "new",
+            "init",
+            "compact",
+            "staged-compact",
+        ];
+        for expected in required {
+            assert!(
+                first_names.contains(&expected),
+                "initial slash commands missing '{expected}', got {first_names:?}"
+            );
+        }
     }
 }

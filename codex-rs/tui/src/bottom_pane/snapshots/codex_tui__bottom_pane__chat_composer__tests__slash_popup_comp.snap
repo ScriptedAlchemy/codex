@@ -1,0 +1,10 @@
+---
+source: tui/src/bottom_pane/chat_composer.rs
+expression: terminal.backend()
+---
+"                                                            "
+"› /comp                                                     "
+"  /compact         summarize conversation to prevent hitting"
+"                   the context limit                        "
+"  /staged-compact  hierarchically summarize older history   "
+"                   while keeping the latest details         "

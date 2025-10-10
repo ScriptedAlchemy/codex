@@ -378,6 +378,11 @@ impl App {
                     .show_review_branch_picker(&cwd, ReviewBranchMode::Simple)
                     .await;
             }
+            AppEvent::OpenReviewBranchPickerWithContext(cwd) => {
+                self.chat_widget
+                    .show_review_branch_picker(&cwd, ReviewBranchMode::SimpleWithContext)
+                    .await;
+            }
             AppEvent::OpenDeepReviewBranchPicker(cwd) => {
                 self.chat_widget
                     .show_review_branch_picker(&cwd, ReviewBranchMode::Deep)
