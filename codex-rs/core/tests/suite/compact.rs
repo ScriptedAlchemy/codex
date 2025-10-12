@@ -837,7 +837,7 @@ async fn staged_compact_keeps_recent_items_verbatim() {
         panic!("expected agent message after staged compact");
     };
     assert!(
-        message.contains("kept 3 recent item"),
+        message.contains("kept 4 recent item"),
         "expected message to mention kept items, got {message}"
     );
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
