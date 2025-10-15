@@ -29,3 +29,23 @@ impl SessionTask for CompactTask {
         compact::run_compact_task(session.clone_session(), ctx, sub_id, input).await
     }
 }
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct StagedCompactTask;
+
+#[async_trait]
+impl SessionTask for StagedCompactTask {
+    fn kind(&self) -> TaskKind {
+        TaskKind::Compact
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        session: Arc<SessionTaskContext>,
+        ctx: Arc<TurnContext>,
+        sub_id: String,
+        input: Vec<InputItem>,
+    ) -> Option<String> {
+        compact::run_staged_compact_task(session.clone_session(), ctx, sub_id, input).await
+    }
+}

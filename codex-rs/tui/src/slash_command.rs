@@ -18,8 +18,10 @@ pub enum SlashCommand {
     New,
     Init,
     Compact,
+    StagedCompact,
     Undo,
     Diff,
+    PrChecks,
     Mention,
     Status,
     Mcp,
@@ -36,10 +38,14 @@ impl SlashCommand {
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
+            SlashCommand::StagedCompact => {
+                "hierarchically summarize older history while keeping the latest details"
+            }
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Undo => "restore the workspace to the last Codex snapshot",
             SlashCommand::Quit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
+            SlashCommand::PrChecks => "run GitHub checks for the current PR",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::Model => "choose what model and reasoning effort to use",
@@ -63,12 +69,14 @@ impl SlashCommand {
             SlashCommand::New
             | SlashCommand::Init
             | SlashCommand::Compact
+            | SlashCommand::StagedCompact
             | SlashCommand::Undo
             | SlashCommand::Model
             | SlashCommand::Approvals
             | SlashCommand::Review
             | SlashCommand::Logout => false,
             SlashCommand::Diff
+            | SlashCommand::PrChecks
             | SlashCommand::Mention
             | SlashCommand::Status
             | SlashCommand::Mcp
@@ -99,3 +107,9 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
 fn beta_features_enabled() -> bool {
     std::env::var_os("BETA_FEATURE").is_some()
 }
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod review_command_tests;

@@ -3,6 +3,7 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::chatwidget::ChatWidget;
+use crate::chatwidget::ReviewBranchMode;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
@@ -373,7 +374,19 @@ impl App {
                 self.chat_widget.set_sandbox_policy(policy);
             }
             AppEvent::OpenReviewBranchPicker(cwd) => {
-                self.chat_widget.show_review_branch_picker(&cwd).await;
+                self.chat_widget
+                    .show_review_branch_picker(&cwd, ReviewBranchMode::Simple)
+                    .await;
+            }
+            AppEvent::OpenDeepReviewBranchPicker(cwd) => {
+                self.chat_widget
+                    .show_review_branch_picker(&cwd, ReviewBranchMode::Deep)
+                    .await;
+            }
+            AppEvent::StartDeepReviewAgainstBase { cwd, base } => {
+                self.chat_widget
+                    .start_deep_review_against_base(&cwd, &base)
+                    .await;
             }
             AppEvent::OpenReviewCommitPicker(cwd) => {
                 self.chat_widget.show_review_commit_picker(&cwd).await;

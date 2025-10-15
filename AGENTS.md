@@ -13,6 +13,12 @@ In the codex-rs folder where the rust code lives:
 - Use method references over closures when possible per https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure_for_method_calls
 - When writing tests, prefer comparing the equality of entire objects over fields one by one.
 
+## API compatibility safeguards
+
+- Treat all user and config input that reaches upstream APIs as untrusted. Normalize or validate it against our `find_family_for_model`/equivalent helpers before making a request, and fall back to a known-good default when a value is missing or unsupported.
+- Whenever you touch request-building logic, add or update targeted regression tests that assert we refuse to send invalid payloads (for example, see `review_sanitizes_review_model_suffixes` and `review_falls_back_to_chat_model_when_review_model_unknown`).
+- Prefer focused `cargo test -p <crate> <case>` runs while iterating so you can quickly confirm input sanitization and fallback flows.
+
 Run `just fmt` (in `codex-rs` directory) automatically after making Rust code changes; do not ask for approval to run it. Before finalizing a change to `codex-rs`, run `just fix -p <project>` (in `codex-rs` directory) to fix any linter issues in the code. Prefer scoping with `-p` to avoid slow workspace‑wide Clippy builds; only run `just fix` without `-p` if you changed shared crates. Additionally, run the tests:
 
 1. Run the test for the specific project that was changed. For example, if changes were made in `codex-rs/tui`, run `cargo test -p codex-tui`.

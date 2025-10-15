@@ -23,6 +23,7 @@ members = [
     "mcp-types",
     "ollama",
     "process-hardening",
+    "proxy",
     "protocol",
     "protocol-ts",
     "rmcp-client",

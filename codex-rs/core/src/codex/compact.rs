@@ -20,6 +20,8 @@ use crate::truncate::truncate_middle;
 use crate::util::backoff;
 use askama::Template;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::LocalShellAction;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::RolloutItem;
@@ -27,6 +29,9 @@ use futures::prelude::*;
 
 pub const SUMMARIZATION_PROMPT: &str = include_str!("../../templates/compact/prompt.md");
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+const STAGED_COMPACT_RECENT_FRACTION: f32 = 0.30;
+const STAGED_COMPACT_SEGMENT_ITEMS: usize = 12;
+const STAGED_COMPACT_SEGMENT_MAX_CHARS: usize = 8_000;
 
 #[derive(Template)]
 #[template(path = "compact/history_bridge.md", escape = "none")]
@@ -61,6 +66,152 @@ pub(crate) async fn run_compact_task(
     sess.send_event(start_event).await;
     run_compact_task_inner(sess.clone(), turn_context, sub_id.clone(), input).await;
     None
+}
+
+pub(crate) async fn run_staged_compact_task(
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
+    sub_id: String,
+    input: Vec<InputItem>,
+) -> Option<String> {
+    let _ = input;
+    let start_event = Event {
+        id: sub_id.clone(),
+        msg: EventMsg::TaskStarted(TaskStartedEvent {
+            model_context_window: turn_context.client.get_model_context_window(),
+        }),
+    };
+    sess.send_event(start_event).await;
+
+    if let Err(err) =
+        run_staged_compact_task_inner(sess.clone(), turn_context.clone(), &sub_id).await
+    {
+        let event = Event {
+            id: sub_id.clone(),
+            msg: EventMsg::Error(ErrorEvent {
+                message: err.to_string(),
+            }),
+        };
+        sess.send_event(event).await;
+    }
+
+    None
+}
+
+async fn run_staged_compact_task_inner(
+    sess: Arc<Session>,
+    turn_context: Arc<TurnContext>,
+    sub_id: &str,
+) -> CodexResult<()> {
+    let history_snapshot = sess.history_snapshot().await;
+    if history_snapshot.is_empty() {
+        let event = Event {
+            id: sub_id.to_string(),
+            msg: EventMsg::AgentMessage(AgentMessageEvent {
+                message: "Staged compact skipped because there is no conversation history."
+                    .to_string(),
+            }),
+        };
+        sess.send_event(event).await;
+        return Ok(());
+    }
+
+    let rollout_item = RolloutItem::TurnContext(TurnContextItem {
+        cwd: turn_context.cwd.clone(),
+        approval_policy: turn_context.approval_policy,
+        sandbox_policy: turn_context.sandbox_policy.clone(),
+        model: turn_context.client.get_model(),
+        effort: turn_context.client.get_reasoning_effort(),
+        summary: turn_context.client.get_reasoning_summary(),
+    });
+    sess.persist_rollout_items(&[rollout_item]).await;
+
+    let initial_context = sess.build_initial_context(turn_context.as_ref());
+    let initial_len = initial_context.len().min(history_snapshot.len());
+    let mut working_items = history_snapshot[initial_len..].to_vec();
+    if working_items.is_empty() {
+        let event = Event {
+            id: sub_id.to_string(),
+            msg: EventMsg::AgentMessage(AgentMessageEvent {
+                message: "Staged compact skipped because only initial context is present."
+                    .to_string(),
+            }),
+        };
+        sess.send_event(event).await;
+        return Ok(());
+    }
+
+    let suffix_len = staged_compact_suffix_len(working_items.len());
+    let prefix_len = working_items.len().saturating_sub(suffix_len);
+    if prefix_len == 0 {
+        let event = Event {
+            id: sub_id.to_string(),
+            msg: EventMsg::AgentMessage(AgentMessageEvent {
+                message: "Staged compact skipped because the transcript is already within the recent window.".to_string(),
+            }),
+        };
+        sess.send_event(event).await;
+        return Ok(());
+    }
+
+    let suffix = working_items.split_off(prefix_len);
+    let prefix = working_items;
+
+    let segments: Vec<&[ResponseItem]> = if prefix.len() <= STAGED_COMPACT_SEGMENT_ITEMS {
+        vec![prefix.as_slice()]
+    } else {
+        prefix
+            .chunks(STAGED_COMPACT_SEGMENT_ITEMS)
+            .collect::<Vec<_>>()
+    };
+
+    let total_segments = segments.len();
+    let mut segment_summaries = Vec::with_capacity(total_segments);
+    for (index, segment) in segments.iter().enumerate() {
+        let display_index = index + 1;
+        let notice =
+            format!("Summarizing segment {display_index}/{total_segments} for staged compact…");
+        sess.notify_background_event(sub_id, notice).await;
+
+        let segment_text = response_items_to_text(segment);
+        let prompt_text = build_segment_prompt(display_index, total_segments, &segment_text);
+        let segment_sub_id = format!("{sub_id}-segment-{display_index}");
+        let summary =
+            summarize_prompt(&sess, turn_context.as_ref(), &segment_sub_id, &prompt_text).await?;
+        segment_summaries.push(summary);
+    }
+
+    let consolidated_summary = if segment_summaries.len() == 1 {
+        segment_summaries[0].clone()
+    } else {
+        let prompt_text = build_consolidated_prompt(&segment_summaries);
+        summarize_prompt(&sess, turn_context.as_ref(), sub_id, &prompt_text).await?
+    };
+
+    let summary_payload = assemble_staged_summary(&consolidated_summary, &segment_summaries);
+    let user_messages = collect_user_messages(&prefix);
+    let mut new_history =
+        build_compacted_history(initial_context, &user_messages, &summary_payload);
+    new_history.extend_from_slice(&suffix);
+    sess.replace_history(new_history).await;
+
+    sess.persist_rollout_items(&[RolloutItem::Compacted(CompactedItem {
+        message: summary_payload.clone(),
+    })])
+    .await;
+    if !suffix.is_empty() {
+        sess.persist_rollout_response_items(&suffix).await;
+    }
+
+    let kept = suffix.len();
+    let message = format!("Staged compact completed — kept {kept} recent item(s) verbatim.");
+    let event = Event {
+        id: sub_id.to_string(),
+        msg: EventMsg::AgentMessage(AgentMessageEvent { message }),
+    };
+    sess.send_event(event).await;
+
+    Ok(())
 }
 
 async fn run_compact_task_inner(
@@ -174,6 +325,221 @@ async fn run_compact_task_inner(
         }),
     };
     sess.send_event(event).await;
+}
+
+fn staged_compact_suffix_len(len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        let desired = (len as f32 * STAGED_COMPACT_RECENT_FRACTION).ceil() as usize;
+        desired.min(len)
+    }
+}
+
+fn limit_for_prompt(text: &str) -> String {
+    if text.len() > STAGED_COMPACT_SEGMENT_MAX_CHARS {
+        truncate_middle(text, STAGED_COMPACT_SEGMENT_MAX_CHARS).0
+    } else {
+        text.to_string()
+    }
+}
+
+fn build_segment_prompt(index: usize, total: usize, segment_text: &str) -> String {
+    let content = if segment_text.trim().is_empty() {
+        "(no textual content in this segment)".to_string()
+    } else {
+        limit_for_prompt(segment_text)
+    };
+    format!(
+        "You are compacting a conversation transcript. Produce a crisp summary for segment {index}/{total} highlighting key actions, decisions, open questions, and TODOs. Prefer bullet points when appropriate.\n\nSegment transcript:\n{content}"
+    )
+}
+
+fn build_consolidated_prompt(segment_summaries: &[String]) -> String {
+    let mut body = String::new();
+    for (index, summary) in segment_summaries.iter().enumerate() {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        let trimmed = summary.trim();
+        let entry = if trimmed.is_empty() {
+            "(segment produced an empty summary)"
+        } else {
+            trimmed
+        };
+        body.push_str(&format!("Segment {}:\n{}", index + 1, entry));
+    }
+    let content = limit_for_prompt(&body);
+    format!(
+        "Combine the following segment summaries into a cohesive narrative that preserves chronology, critical decisions, outstanding work, and risks. If information is already concise, keep it; otherwise merge overlapping points.\n\nSegment summaries:\n{content}"
+    )
+}
+
+fn assemble_staged_summary(consolidated: &str, segments: &[String]) -> String {
+    let mut sections = Vec::new();
+    let consolidated = consolidated.trim();
+    if !consolidated.is_empty() {
+        sections.push(format!("High-level summary:\n{consolidated}"));
+    }
+    if !segments.is_empty() {
+        let mut breakdown = String::from("Segment breakdown:");
+        for (index, summary) in segments.iter().enumerate() {
+            let trimmed = summary.trim();
+            let entry = if trimmed.is_empty() {
+                "(empty)"
+            } else {
+                trimmed
+            };
+            breakdown.push_str(&format!("\n{}. {entry}", index + 1));
+        }
+        sections.push(breakdown);
+    }
+    sections.join("\n\n")
+}
+
+fn response_items_to_text(items: &[ResponseItem]) -> String {
+    use codex_protocol::models::LocalShellStatus;
+
+    let mut lines = Vec::new();
+    for item in items {
+        match item {
+            ResponseItem::Message { role, content, .. } => {
+                if let Some(text) = content_items_to_text(content) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        lines.push(format!("{role}: {trimmed}"));
+                    }
+                }
+            }
+            ResponseItem::Reasoning { summary, .. } => {
+                let mut pieces = Vec::new();
+                for entry in summary {
+                    match entry {
+                        ReasoningItemReasoningSummary::SummaryText { text } => {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                pieces.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+                if !pieces.is_empty() {
+                    lines.push(format!("assistant.reasoning: {}", pieces.join(" | ")));
+                }
+            }
+            ResponseItem::FunctionCall {
+                name, arguments, ..
+            } => {
+                let truncated = limit_for_prompt(arguments);
+                lines.push(format!("assistant.function_call[{name}]: {truncated}"));
+            }
+            ResponseItem::FunctionCallOutput { call_id, output } => {
+                let truncated = limit_for_prompt(&output.content);
+                lines.push(format!("tool_output[{call_id}]: {truncated}"));
+            }
+            ResponseItem::CustomToolCall { name, input, .. } => {
+                let truncated = limit_for_prompt(input);
+                lines.push(format!("assistant.custom_tool[{name}]: {truncated}"));
+            }
+            ResponseItem::CustomToolCallOutput { call_id, output } => {
+                let truncated = limit_for_prompt(output);
+                lines.push(format!("custom_tool_output[{call_id}]: {truncated}"));
+            }
+            ResponseItem::LocalShellCall { status, action, .. } => {
+                match action {
+                    LocalShellAction::Exec(exec) => {
+                        let command = exec.command.join(" ");
+                        lines.push(format!("exec[{status:?}]: {}", limit_for_prompt(&command)));
+                    }
+                }
+                if *status == LocalShellStatus::Incomplete {
+                    lines.push("exec result: incomplete".to_string());
+                }
+            }
+            ResponseItem::WebSearchCall { action, .. } => match action {
+                codex_protocol::models::WebSearchAction::Search { query } => {
+                    lines.push(format!("web_search: {query}"));
+                }
+                codex_protocol::models::WebSearchAction::Other => {
+                    lines.push("web_search: other".to_string());
+                }
+            },
+            ResponseItem::Other => {}
+        }
+    }
+
+    let joined = lines.join("\n");
+    limit_for_prompt(&joined)
+}
+
+async fn summarize_prompt(
+    sess: &Session,
+    turn_context: &TurnContext,
+    sub_id: &str,
+    prompt_text: &str,
+) -> CodexResult<String> {
+    let prompt_message = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: limit_for_prompt(prompt_text),
+        }],
+    };
+    let prompt = Prompt {
+        input: vec![prompt_message],
+        ..Default::default()
+    };
+
+    let max_retries = turn_context.client.get_provider().stream_max_retries();
+    let mut retries = 0;
+
+    loop {
+        let mut stream = turn_context.client.clone().stream(&prompt).await?;
+        let mut responses = Vec::new();
+
+        loop {
+            let maybe_event = stream.next().await;
+            let Some(event) = maybe_event else {
+                return Err(CodexErr::Stream(
+                    "stream closed before response.completed".to_string(),
+                    None,
+                ));
+            };
+            match event {
+                Ok(ResponseEvent::OutputItemDone(item)) => {
+                    responses.push(item);
+                }
+                Ok(ResponseEvent::RateLimits(snapshot)) => {
+                    sess.update_rate_limits(sub_id, snapshot).await;
+                }
+                Ok(ResponseEvent::Completed { token_usage, .. }) => {
+                    sess.update_token_usage_info(sub_id, turn_context, token_usage.as_ref())
+                        .await;
+                    let summary =
+                        get_last_assistant_message_from_turn(&responses).unwrap_or_default();
+                    return Ok(summary);
+                }
+                Ok(_) => continue,
+                Err(err) => {
+                    if retries < max_retries {
+                        retries += 1;
+                        let delay = backoff(retries);
+                        sess.notify_stream_error(
+                            sub_id,
+                            format!(
+                                "stream error: {err}; retrying {retries}/{max_retries} in {delay:?}…"
+                            ),
+                        )
+                        .await;
+                        tokio::time::sleep(delay).await;
+                        break;
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
@@ -413,5 +779,25 @@ mod tests {
             bridge_text.contains("SUMMARY"),
             "bridge should include the provided summary text"
         );
+    }
+
+    #[test]
+    fn staged_compact_suffix_len_respects_fraction() {
+        assert_eq!(staged_compact_suffix_len(0), 0);
+        assert_eq!(staged_compact_suffix_len(1), 1);
+        assert_eq!(staged_compact_suffix_len(3), 1);
+        assert_eq!(staged_compact_suffix_len(10), 3);
+    }
+
+    #[test]
+    fn assemble_staged_summary_formats_sections() {
+        let consolidated = "Overall summary";
+        let segments = vec!["first chunk".to_string(), "second chunk".to_string()];
+        let formatted = assemble_staged_summary(consolidated, &segments);
+
+        assert!(formatted.contains("High-level summary"));
+        assert!(formatted.contains("Segment breakdown"));
+        assert!(formatted.contains("1. first chunk"));
+        assert!(formatted.contains("2. second chunk"));
     }
 }

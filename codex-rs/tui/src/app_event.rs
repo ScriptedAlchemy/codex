@@ -79,6 +79,15 @@ pub(crate) enum AppEvent {
     /// Open the branch picker option from the review popup.
     OpenReviewBranchPicker(PathBuf),
 
+    /// Open the branch picker for a deep (multi-stage) review using the orchestrator.
+    OpenDeepReviewBranchPicker(PathBuf),
+
+    /// Start a deep review run once the user selects the base branch.
+    StartDeepReviewAgainstBase {
+        cwd: PathBuf,
+        base: String,
+    },
+
     /// Open the commit picker option from the review popup.
     OpenReviewCommitPicker(PathBuf),
 

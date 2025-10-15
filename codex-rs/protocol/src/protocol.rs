@@ -171,6 +171,9 @@ pub enum Op {
     /// to generate a summary which will be returned as an AgentMessage event.
     Compact,
 
+    /// Perform hierarchical compaction that preserves the most recent portion of the transcript.
+    StagedCompact,
+
     /// Request a code review from the agent.
     Review { review_request: ReviewRequest },
 

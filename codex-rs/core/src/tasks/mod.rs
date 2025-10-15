@@ -20,6 +20,7 @@ use crate::state::RunningTask;
 use crate::state::TaskKind;
 
 pub(crate) use compact::CompactTask;
+pub(crate) use compact::StagedCompactTask;
 pub(crate) use regular::RegularTask;
 pub(crate) use review::ReviewTask;
 

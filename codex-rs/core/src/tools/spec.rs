@@ -13,6 +13,8 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
+const RUN_PR_CHECKS_TOOL_NAME: &str = "run_pr_checks";
+
 #[derive(Debug, Clone)]
 pub enum ConfigShellToolType {
     Default,
@@ -512,6 +514,21 @@ fn create_list_dir_tool() -> ToolSpec {
         },
     })
 }
+
+fn create_pr_checks_tool() -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: RUN_PR_CHECKS_TOOL_NAME.to_string(),
+        description:
+            "Runs `gh pr checks --watch` in the session working directory and returns the output."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties: BTreeMap::new(),
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+    })
+}
 /// TODO(dylan): deprecate once we get rid of json tool
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ApplyPatchToolArgs {
@@ -725,6 +742,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::ListDirHandler;
     use crate::tools::handlers::McpHandler;
     use crate::tools::handlers::PlanHandler;
+    use crate::tools::handlers::PrChecksHandler;
     use crate::tools::handlers::ReadFileHandler;
     use crate::tools::handlers::ShellHandler;
     use crate::tools::handlers::TestSyncHandler;
@@ -738,6 +756,7 @@ pub(crate) fn build_specs(
     let exec_stream_handler = Arc::new(ExecStreamHandler);
     let unified_exec_handler = Arc::new(UnifiedExecHandler);
     let plan_handler = Arc::new(PlanHandler);
+    let pr_checks_handler = Arc::new(PrChecksHandler);
     let apply_patch_handler = Arc::new(ApplyPatchHandler);
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
@@ -814,6 +833,15 @@ pub(crate) fn build_specs(
         let list_dir_handler = Arc::new(ListDirHandler);
         builder.push_spec_with_parallel_support(create_list_dir_tool(), true);
         builder.register_handler("list_dir", list_dir_handler);
+    }
+
+    if config
+        .experimental_supported_tools
+        .iter()
+        .any(|tool| tool == RUN_PR_CHECKS_TOOL_NAME)
+    {
+        builder.push_spec(create_pr_checks_tool());
+        builder.register_handler(RUN_PR_CHECKS_TOOL_NAME, pr_checks_handler);
     }
 
     if config
@@ -1222,14 +1250,16 @@ mod tests {
             &[
                 "unified_exec",
                 "apply_patch",
+                RUN_PR_CHECKS_TOOL_NAME,
                 "web_search",
                 "view_image",
                 "dash/search",
             ],
         );
 
+        let dash_search = find_tool(&tools, "dash/search");
         assert_eq!(
-            tools[4].spec,
+            dash_search.spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/search".to_string(),
                 parameters: JsonSchema::Object {
@@ -1289,13 +1319,15 @@ mod tests {
             &[
                 "unified_exec",
                 "apply_patch",
+                RUN_PR_CHECKS_TOOL_NAME,
                 "web_search",
                 "view_image",
                 "dash/paginate",
             ],
         );
+        let dash_paginate = find_tool(&tools, "dash/paginate");
         assert_eq!(
-            tools[4].spec,
+            dash_paginate.spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/paginate".to_string(),
                 parameters: JsonSchema::Object {
@@ -1353,13 +1385,15 @@ mod tests {
             &[
                 "unified_exec",
                 "apply_patch",
+                RUN_PR_CHECKS_TOOL_NAME,
                 "web_search",
                 "view_image",
                 "dash/tags",
             ],
         );
+        let dash_tags = find_tool(&tools, "dash/tags");
         assert_eq!(
-            tools[4].spec,
+            dash_tags.spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/tags".to_string(),
                 parameters: JsonSchema::Object {
@@ -1420,13 +1454,15 @@ mod tests {
             &[
                 "unified_exec",
                 "apply_patch",
+                RUN_PR_CHECKS_TOOL_NAME,
                 "web_search",
                 "view_image",
                 "dash/value",
             ],
         );
+        let dash_value = find_tool(&tools, "dash/value");
         assert_eq!(
-            tools[4].spec,
+            dash_value.spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/value".to_string(),
                 parameters: JsonSchema::Object {
@@ -1524,14 +1560,16 @@ mod tests {
             &[
                 "unified_exec",
                 "apply_patch",
+                RUN_PR_CHECKS_TOOL_NAME,
                 "web_search",
                 "view_image",
                 "test_server/do_something_cool",
             ],
         );
 
+        let do_something_cool = find_tool(&tools, "test_server/do_something_cool");
         assert_eq!(
-            tools[4].spec,
+            do_something_cool.spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
