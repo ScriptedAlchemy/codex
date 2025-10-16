@@ -97,6 +97,9 @@ pub(crate) enum AppEvent {
     /// Open the custom prompt option from the review popup.
     OpenReviewCustomPrompt,
 
+    /// `/pr-checks` completed with the provided outcome.
+    PrChecksCompleted(crate::pr_checks::PrChecksOutcome),
+
     /// Open the approval popup.
     FullScreenApprovalRequest(ApprovalRequest),
 }

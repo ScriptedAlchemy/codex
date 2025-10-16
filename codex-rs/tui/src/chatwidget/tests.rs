@@ -23,6 +23,7 @@ use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::FileChange;
+use codex_core::protocol::InputItem;
 use codex_core::protocol::InputMessageKind;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
@@ -1166,6 +1167,94 @@ fn summarize_pr_checks_for_prompt_reports_spawn_error() {
     let summary = super::summarize_pr_checks_for_prompt(&outcome);
     assert!(summary.contains("Status: error"));
     assert!(summary.contains("Spawn error: gh command not found"));
+}
+
+#[test]
+fn pr_checks_failure_auto_submits_followup_message() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    let outcome = PrChecksOutcome {
+        success: false,
+        exit_status: Some(1),
+        stdout: "check foo failed".to_string(),
+        stderr: String::new(),
+        spawn_error: None,
+    };
+
+    chat.on_pr_checks_completed(outcome);
+
+    let history = drain_insert_history(&mut rx);
+    assert!(
+        !history.is_empty(),
+        "expected PR checks outcome to be recorded in history"
+    );
+
+    let mut submitted = Vec::new();
+    while let Ok(op) = op_rx.try_recv() {
+        if let Op::UserInput { items } = op {
+            submitted.push(items);
+        }
+    }
+
+    assert_eq!(
+        submitted.len(),
+        1,
+        "expected a single follow-up user message"
+    );
+    let items = &submitted[0];
+    assert_eq!(items.len(), 1, "expected text-only follow-up message");
+    match &items[0] {
+        InputItem::Text { text } => {
+            assert!(
+                text.contains("PR checks are failing"),
+                "follow-up message should mention failure: {text:?}"
+            );
+            assert!(
+                text.contains("read the CI logs"),
+                "follow-up message should instruct the agent to read CI logs: {text:?}"
+            );
+            assert!(
+                text.contains("determine the root cause"),
+                "follow-up message should request root cause analysis: {text:?}"
+            );
+            assert!(
+                text.contains("fix every failing check"),
+                "follow-up message should demand fixing checks: {text:?}"
+            );
+            assert!(
+                text.contains("check foo failed"),
+                "follow-up message should include summary"
+            );
+        }
+        other => panic!("unexpected follow-up payload: {other:?}"),
+    }
+}
+
+#[test]
+fn pr_checks_success_does_not_auto_submit() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    let outcome = PrChecksOutcome {
+        success: true,
+        exit_status: Some(0),
+        stdout: "All checks passed".to_string(),
+        stderr: String::new(),
+        spawn_error: None,
+    };
+
+    chat.on_pr_checks_completed(outcome);
+
+    let history = drain_insert_history(&mut rx);
+    assert!(
+        !history.is_empty(),
+        "expected PR checks outcome to be recorded in history"
+    );
+
+    while let Ok(op) = op_rx.try_recv() {
+        if let Op::UserInput { .. } = op {
+            panic!("did not expect follow-up message when checks succeed");
+        }
+    }
 }
 
 fn render_bottom_first_row(chat: &ChatWidget, width: u16) -> String {

@@ -1275,9 +1275,7 @@ impl ChatWidget {
                 let tx = self.app_event_tx.clone();
                 tokio::spawn(async move {
                     let outcome = crate::pr_checks::run_pr_checks(cwd).await;
-                    tx.send(AppEvent::InsertHistoryCell(Box::new(
-                        history_cell::new_pr_checks_result(outcome),
-                    )));
+                    tx.send(AppEvent::PrChecksCompleted(outcome));
                 });
             }
             SlashCommand::Mention => {
@@ -1756,6 +1754,21 @@ impl ChatWidget {
                 }
             }
         }
+    }
+
+    pub(crate) fn on_pr_checks_completed(&mut self, outcome: PrChecksOutcome) {
+        let history_outcome = outcome.clone();
+        self.add_to_history(history_cell::new_pr_checks_result(history_outcome));
+
+        if outcome.spawn_error.is_none() && !outcome.success {
+            let summary = summarize_pr_checks_for_prompt(&outcome);
+            let message = format!(
+                "PR checks are failing. Carefully read the CI logs above, determine the root cause, and fix every failing check. Provide a short summary of the failures before outlining the plan:\n\n{summary}"
+            );
+            self.submit_text_message(message);
+        }
+
+        self.request_redraw();
     }
 
     fn request_redraw(&mut self) {
