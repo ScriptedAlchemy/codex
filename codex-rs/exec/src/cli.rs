@@ -75,6 +75,10 @@ pub struct Cli {
     #[arg(long = "output-last-message", short = 'o', value_name = "FILE")]
     pub last_message_file: Option<PathBuf>,
 
+    /// Allow Codex to delegate the initial task to opencode before continuing locally.
+    #[arg(long = "allow-opencode", default_value_t = false)]
+    pub allow_opencode: bool,
+
     /// Initial instructions for the agent. If not provided as an argument (or
     /// if `-` is used), instructions are read from stdin.
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]

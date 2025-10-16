@@ -837,7 +837,7 @@ async fn staged_compact_keeps_recent_items_verbatim() {
         panic!("expected agent message after staged compact");
     };
     assert!(
-        message.contains("kept 3 recent item"),
+        message.contains("kept 4 recent item"),
         "expected message to mention kept items, got {message}"
     );
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
@@ -926,16 +926,14 @@ async fn staged_compact_keeps_recent_items_verbatim() {
                 && texts
                     .iter()
                     .any(|text| text.trim() == assistant_responses[3])
-        })
-            && message_entries.iter().any(|(role, texts)| {
-                role == "assistant"
-                    && texts
-                        .iter()
-                        .any(|text| text.trim() == assistant_responses[4])
-            })
-            && message_entries.iter().any(|(role, texts)| {
-                role == "user" && texts.iter().any(|text| text.trim() == user_inputs[4])
-            }),
+        }) && message_entries.iter().any(|(role, texts)| {
+            role == "assistant"
+                && texts
+                    .iter()
+                    .any(|text| text.trim() == assistant_responses[4])
+        }) && message_entries.iter().any(|(role, texts)| {
+            role == "user" && texts.iter().any(|text| text.trim() == user_inputs[4])
+        }),
         "recent transcript items should remain verbatim"
     );
     assert!(

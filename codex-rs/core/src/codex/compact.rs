@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::Session;
@@ -32,6 +33,8 @@ const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
 const STAGED_COMPACT_RECENT_FRACTION: f32 = 0.30;
 const STAGED_COMPACT_SEGMENT_ITEMS: usize = 12;
 const STAGED_COMPACT_SEGMENT_MAX_CHARS: usize = 8_000;
+const HISTORY_BRIDGE_PREFIX: &str =
+    "You were originally given instructions from a user over one or more turns.";
 
 #[derive(Template)]
 #[template(path = "compact/history_bridge.md", escape = "none")]
@@ -154,8 +157,11 @@ async fn run_staged_compact_task_inner(
         return Ok(());
     }
 
-    let suffix = working_items.split_off(prefix_len);
-    let prefix = working_items;
+    let mut suffix = working_items.split_off(prefix_len);
+    let mut prefix = working_items;
+
+    rebalance_suffix_turn_boundary(&mut prefix, &mut suffix);
+    rebalance_suffix_tool_pairs(&mut prefix, &mut suffix);
 
     let segments: Vec<&[ResponseItem]> = if prefix.len() <= STAGED_COMPACT_SEGMENT_ITEMS {
         vec![prefix.as_slice()]
@@ -335,6 +341,67 @@ fn staged_compact_suffix_len(len: usize) -> usize {
     } else {
         let desired = (len as f32 * STAGED_COMPACT_RECENT_FRACTION).ceil() as usize;
         desired.min(len)
+    }
+}
+
+fn rebalance_suffix_turn_boundary(prefix: &mut Vec<ResponseItem>, suffix: &mut Vec<ResponseItem>) {
+    if suffix.is_empty() {
+        return;
+    }
+
+    if matches!(
+        suffix.first(),
+        Some(ResponseItem::Message { role, .. }) if role == "user"
+    ) {
+        return;
+    }
+
+    let Some(user_index) = prefix
+        .iter()
+        .rposition(|item| matches!(item, ResponseItem::Message { role, .. } if role == "user"))
+    else {
+        return;
+    };
+
+    let moved = prefix.split_off(user_index);
+    suffix.splice(0..0, moved);
+}
+
+fn rebalance_suffix_tool_pairs(prefix: &mut Vec<ResponseItem>, suffix: &mut Vec<ResponseItem>) {
+    let mut function_calls_in_suffix: HashSet<String> = HashSet::new();
+    let mut custom_calls_in_suffix: HashSet<String> = HashSet::new();
+
+    let mut index = 0usize;
+    while index < suffix.len() {
+        match &suffix[index] {
+            ResponseItem::FunctionCall { call_id, .. } => {
+                function_calls_in_suffix.insert(call_id.clone());
+                index += 1;
+            }
+            ResponseItem::FunctionCallOutput { call_id, .. } => {
+                if !function_calls_in_suffix.contains(call_id) {
+                    let item = suffix.remove(index);
+                    prefix.push(item);
+                } else {
+                    index += 1;
+                }
+            }
+            ResponseItem::CustomToolCall { call_id, .. } => {
+                custom_calls_in_suffix.insert(call_id.clone());
+                index += 1;
+            }
+            ResponseItem::CustomToolCallOutput { call_id, .. } => {
+                if !custom_calls_in_suffix.contains(call_id) {
+                    let item = suffix.remove(index);
+                    prefix.push(item);
+                } else {
+                    index += 1;
+                }
+            }
+            _ => {
+                index += 1;
+            }
+        }
     }
 }
 
@@ -577,10 +644,11 @@ pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<String> {
 }
 
 pub fn is_session_prefix_message(text: &str) -> bool {
+    let kind = InputMessageKind::from(("user", text));
     matches!(
-        InputMessageKind::from(("user", text)),
+        kind,
         InputMessageKind::UserInstructions | InputMessageKind::EnvironmentContext
-    )
+    ) || text.trim_start().starts_with(HISTORY_BRIDGE_PREFIX)
 }
 
 pub(crate) fn build_compacted_history(
@@ -656,6 +724,7 @@ async fn drain_to_completed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_protocol::models::FunctionCallOutputPayload;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -750,6 +819,29 @@ mod tests {
     }
 
     #[test]
+    fn collect_user_messages_skips_history_bridge() {
+        let bridge_text = format!("{HISTORY_BRIDGE_PREFIX}\n\nSummary text follows.");
+        let items = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText { text: bridge_text }],
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "real user message".to_string(),
+                }],
+            },
+        ];
+
+        let collected = collect_user_messages(&items);
+
+        assert_eq!(vec!["real user message".to_string()], collected);
+    }
+
+    #[test]
     fn build_compacted_history_truncates_overlong_user_messages() {
         // Prepare a very large prior user message so the aggregated
         // `user_messages_text` exceeds the truncation threshold used by
@@ -801,5 +893,266 @@ mod tests {
         assert!(formatted.contains("Segment breakdown"));
         assert!(formatted.contains("1. first chunk"));
         assert!(formatted.contains("2. second chunk"));
+    }
+
+    #[test]
+    fn rebalance_suffix_turn_boundary_includes_preceding_user_message() {
+        let mut prefix = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "older agent response".to_string(),
+                }],
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "follow-up question".to_string(),
+                }],
+            },
+        ];
+
+        let mut suffix = vec![ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "latest answer".to_string(),
+            }],
+        }];
+
+        rebalance_suffix_turn_boundary(&mut prefix, &mut suffix);
+
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(suffix.len(), 2);
+        assert_eq!(
+            content_items_to_text(match &suffix[0] {
+                ResponseItem::Message { role, content, .. } if role == "user" => content,
+                other => panic!("unexpected first suffix item: {other:?}"),
+            }),
+            Some("follow-up question".to_string())
+        );
+        assert_eq!(
+            content_items_to_text(match &suffix[1] {
+                ResponseItem::Message { role, content, .. } if role == "assistant" => content,
+                other => panic!("unexpected second suffix item: {other:?}"),
+            }),
+            Some("latest answer".to_string())
+        );
+    }
+
+    #[test]
+    fn rebalance_suffix_turn_boundary_handles_tool_calls() {
+        let mut prefix = vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "run diagnostics".to_string(),
+            }],
+        }];
+
+        let mut suffix = vec![
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "shell".to_string(),
+                arguments: "{}".to_string(),
+                call_id: "call-1".to_string(),
+            },
+            ResponseItem::FunctionCallOutput {
+                call_id: "call-1".to_string(),
+                output: FunctionCallOutputPayload {
+                    content: "ok".to_string(),
+                    success: Some(true),
+                },
+            },
+        ];
+
+        rebalance_suffix_turn_boundary(&mut prefix, &mut suffix);
+
+        assert!(prefix.is_empty());
+        assert!(matches!(
+            &suffix[0],
+            ResponseItem::Message { role, .. } if role == "user"
+        ));
+        assert_eq!(suffix.len(), 3);
+        assert!(matches!(suffix[1], ResponseItem::FunctionCall { .. }));
+        assert!(matches!(suffix[2], ResponseItem::FunctionCallOutput { .. }));
+    }
+
+    #[test]
+    fn rebalance_suffix_turn_boundary_keeps_real_chat_rounds() {
+        const USER_INITIAL: &str = "so i think they are not marked as used properly or the modules are not getting included, added properly to the graph the way they are supposed to. compare again with main branch to understand more closely how the plugins work\nmaybe the hoist plugin is copying the wrong dependency module into the wrong chunk or soemething?";
+        const USER_FOLLOWUP: &str = "› nothing is stale though. look at the dist code of th built apps. something may be wrong with the\nplugin implementation. diff this branch agains main branch";
+        const AGENT_SUMMARY_ONE: &str = "• Explored\n  └ Search createLogger in webpack-bundler-runtime\n    Read mf-native-worker.98361f6e72b6b863aacc.js\n\n• I'm figuring out why the runtime's createLogger export isn't recognized as a function, suspecting\n  the bundler or dev server might be caching an older build or referencing the wrong dist files. I'll\n  verify the built runtime code by loading it directly with Node to confirm what exports are actually\n  available.";
+        const AGENT_SUMMARY_TWO: &str = "• Those stack traces are coming from the remote bundles (port 3006) that are still serving an old\n  copy of @module-federation/runtime. The new createLogger export is in your workspace, but the\n  remote dev server hasn’t rebuilt since we added it, so it’s still loading the previous bundle where\n  runtime.createLogger was undefined.\n\n  Quick fix: rebuild the runtime and restart the remotes so they pick up the fresh bundle.\n\n  # (From /Users/bytedance/dev/core)\n\n  # Restart your dev servers\n  pnpm app:runtime:dev\n\n  Once the remote dev servers restart with those rebuilt bundles, runtime.createLogger resolves to the\n  real function and the (0, index_esm.h) TypeError disappears. The async/await warning is unrelated\n  —it’s webpack complaining about the external script runtime; it’s been there since before these\n  changes.";
+        const TOOL_STDOUT: &str =
+            "        at ChildProcess._handle.onexit (node:internal/child_process:294:12)";
+
+        let mut working_items = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: USER_INITIAL.to_string(),
+                }],
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: AGENT_SUMMARY_ONE.to_string(),
+                }],
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: USER_FOLLOWUP.to_string(),
+                }],
+            },
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "shell".to_string(),
+                arguments:
+                    "{\"command\":[\"bash\",\"-lc\",\"node tools/scripts/run-runtime-e2e.mjs\"]}"
+                        .to_string(),
+                call_id: "call-shell-jsonl".to_string(),
+            },
+            ResponseItem::FunctionCallOutput {
+                call_id: "call-shell-jsonl".to_string(),
+                output: FunctionCallOutputPayload {
+                    content: TOOL_STDOUT.to_string(),
+                    success: Some(false),
+                },
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: AGENT_SUMMARY_TWO.to_string(),
+                }],
+            },
+        ];
+
+        let suffix_len = staged_compact_suffix_len(working_items.len());
+        assert_eq!(suffix_len, 2);
+        let prefix_len = working_items.len() - suffix_len;
+        let mut suffix = working_items.split_off(prefix_len);
+        let mut prefix = working_items;
+
+        rebalance_suffix_turn_boundary(&mut prefix, &mut suffix);
+        rebalance_suffix_tool_pairs(&mut prefix, &mut suffix);
+
+        assert_eq!(prefix.len(), 2);
+        assert!(matches!(
+            &prefix[0],
+            ResponseItem::Message { role, .. } if role == "user"
+        ));
+        assert!(matches!(
+            &prefix[1],
+            ResponseItem::Message { role, .. } if role == "assistant"
+        ));
+
+        assert_eq!(suffix.len(), 4);
+        match &suffix[0] {
+            ResponseItem::Message { role, content, .. } => {
+                assert_eq!(role, "user");
+                assert_eq!(
+                    content_items_to_text(content),
+                    Some(USER_FOLLOWUP.to_string())
+                );
+            }
+            other => panic!("expected user message at start of suffix, found {other:?}"),
+        }
+        assert!(matches!(suffix[1], ResponseItem::FunctionCall { .. }));
+        assert!(matches!(suffix[2], ResponseItem::FunctionCallOutput { .. }));
+        match suffix.last().unwrap() {
+            ResponseItem::Message { role, content, .. } => {
+                assert_eq!(role, "assistant");
+                assert_eq!(
+                    content_items_to_text(content),
+                    Some(AGENT_SUMMARY_TWO.to_string())
+                );
+            }
+            other => panic!("expected assistant message at end of suffix, found {other:?}"),
+        }
+
+        assert!(
+            prefix
+                .iter()
+                .all(|item| !matches!(item, ResponseItem::FunctionCallOutput { .. }))
+        );
+    }
+
+    #[test]
+    fn rebalance_suffix_tool_pairs_moves_orphan_outputs_into_prefix() {
+        let function_call_id = "call-fn".to_string();
+        let custom_call_id = "call-custom".to_string();
+
+        let mut prefix = vec![
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "shell".to_string(),
+                arguments: "{}".to_string(),
+                call_id: function_call_id.clone(),
+            },
+            ResponseItem::CustomToolCall {
+                id: None,
+                status: None,
+                call_id: custom_call_id.clone(),
+                name: "apply_patch".to_string(),
+                input: "{}".to_string(),
+            },
+        ];
+
+        let mut suffix = vec![
+            ResponseItem::FunctionCallOutput {
+                call_id: function_call_id,
+                output: FunctionCallOutputPayload {
+                    content: "ok".to_string(),
+                    success: Some(true),
+                },
+            },
+            ResponseItem::CustomToolCallOutput {
+                call_id: custom_call_id,
+                output: "patched".to_string(),
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "latest commentary".to_string(),
+                }],
+            },
+        ];
+
+        rebalance_suffix_tool_pairs(&mut prefix, &mut suffix);
+
+        assert!(
+            suffix
+                .iter()
+                .all(|item| !matches!(item, ResponseItem::FunctionCallOutput { .. }))
+        );
+        assert!(
+            suffix
+                .iter()
+                .all(|item| !matches!(item, ResponseItem::CustomToolCallOutput { .. }))
+        );
+
+        assert_eq!(
+            prefix
+                .iter()
+                .filter(|item| matches!(item, ResponseItem::FunctionCallOutput { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            prefix
+                .iter()
+                .filter(|item| matches!(item, ResponseItem::CustomToolCallOutput { .. }))
+                .count(),
+            1
+        );
     }
 }

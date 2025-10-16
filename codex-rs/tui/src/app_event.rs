@@ -79,6 +79,9 @@ pub(crate) enum AppEvent {
     /// Open the branch picker option from the review popup.
     OpenReviewBranchPicker(PathBuf),
 
+    /// Open the branch picker and include recent transcript context in the prompt.
+    OpenReviewBranchPickerWithContext(PathBuf),
+
     /// Open the branch picker for a deep (multi-stage) review using the orchestrator.
     OpenDeepReviewBranchPicker(PathBuf),
 
@@ -93,6 +96,9 @@ pub(crate) enum AppEvent {
 
     /// Open the custom prompt option from the review popup.
     OpenReviewCustomPrompt,
+
+    /// `/pr-checks` completed with the provided outcome.
+    PrChecksCompleted(crate::pr_checks::PrChecksOutcome),
 
     /// Open the approval popup.
     FullScreenApprovalRequest(ApprovalRequest),

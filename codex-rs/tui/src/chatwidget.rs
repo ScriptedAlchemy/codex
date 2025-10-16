@@ -82,6 +82,7 @@ use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::markdown::append_markdown;
+use crate::pr_checks::PrChecksOutcome;
 use crate::review_branch::chunker::ChunkLimits;
 use crate::review_branch::orchestrator::Orchestrator;
 use crate::review_branch::orchestrator::OrchestratorStage;
@@ -119,6 +120,8 @@ use codex_protocol::plan_tool::UpdatePlanArgs;
 use strum::IntoEnumIterator;
 
 const MAX_TRACKED_GHOST_COMMITS: usize = 20;
+const MAX_TRANSCRIPT_CONTEXT_MESSAGES: usize = 10;
+const MAX_PR_CHECKS_OUTPUT_CHARS: usize = 2000;
 
 const DEEP_REVIEW_BATCH_PROMPT: &str = include_str!("prompt_for_review_branch_batch_command.md");
 const DEEP_REVIEW_CONSOLIDATION_PROMPT: &str =
@@ -127,6 +130,7 @@ const DEEP_REVIEW_CONSOLIDATION_PROMPT: &str =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReviewBranchMode {
     Simple,
+    SimpleWithContext,
     Deep,
 }
 
@@ -272,6 +276,8 @@ pub(crate) struct ChatWidget {
     suppress_session_configured_redraw: bool,
     // User messages queued while a turn is in progress
     queued_user_messages: VecDeque<UserMessage>,
+    // Recent conversation transcript excerpts for review context.
+    transcript_messages: VecDeque<TranscriptMessage>,
     // Pending notification to show when unfocused on next Draw
     pending_notification: Option<Notification>,
     // Simple review mode flag; used to adjust layout and banners.
@@ -308,6 +314,74 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
     } else {
         Some(UserMessage { text, image_paths })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TranscriptRole {
+    User,
+    Assistant,
+}
+
+impl TranscriptRole {
+    fn label(self) -> &'static str {
+        match self {
+            TranscriptRole::User => "User",
+            TranscriptRole::Assistant => "Assistant",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TranscriptMessage {
+    role: TranscriptRole,
+    text: String,
+}
+
+fn truncate_ci_output(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "(empty)".to_string();
+    }
+    let mut collected: String = trimmed.chars().take(MAX_PR_CHECKS_OUTPUT_CHARS).collect();
+    if trimmed.chars().count() > MAX_PR_CHECKS_OUTPUT_CHARS {
+        collected.push_str("… [truncated]");
+    }
+    collected
+}
+
+fn summarize_pr_checks_for_prompt(outcome: &PrChecksOutcome) -> String {
+    let status = if outcome.spawn_error.is_some() {
+        "error"
+    } else if outcome.success {
+        "passing"
+    } else {
+        "failing"
+    };
+
+    let mut lines = Vec::new();
+    lines.push(format!("Status: {status}"));
+
+    if let Some(code) = outcome.exit_status {
+        lines.push(format!("Exit status: {code}"));
+    }
+
+    if let Some(err) = &outcome.spawn_error {
+        lines.push(format!("Spawn error: {err}"));
+    }
+
+    if !outcome.stdout.trim().is_empty() {
+        lines.push(format!("stdout:\n{}", truncate_ci_output(&outcome.stdout)));
+    }
+
+    if !outcome.stderr.trim().is_empty() {
+        lines.push(format!("stderr:\n{}", truncate_ci_output(&outcome.stderr)));
+    }
+
+    if !outcome.success && outcome.spawn_error.is_none() {
+        lines.push("Action: Investigate failing checks before approving.".to_string());
+    }
+
+    lines.join("\n")
 }
 
 impl ChatWidget {
@@ -356,6 +430,7 @@ impl ChatWidget {
     }
 
     fn on_agent_message(&mut self, message: String) {
+        self.record_transcript_message(TranscriptRole::Assistant, message.clone());
         // If we have a stream_controller, then the final agent message is redundant and will be a
         // duplicate of what has already been streamed.
         if self.stream_controller.is_none() {
@@ -418,6 +493,9 @@ impl ChatWidget {
     }
 
     fn on_task_complete(&mut self, last_agent_message: Option<String>) {
+        if let Some(message) = last_agent_message.clone() {
+            self.record_transcript_message(TranscriptRole::Assistant, message);
+        }
         // If a stream is currently active, finalize it.
         self.flush_answer_stream_with_separator();
         // Mark task stopped and request redraw now that all content is in history.
@@ -956,6 +1034,7 @@ impl ChatWidget {
             full_reasoning_buffer: String::new(),
             conversation_id: None,
             queued_user_messages: VecDeque::new(),
+            transcript_messages: VecDeque::new(),
             show_welcome_banner: true,
             suppress_session_configured_redraw: false,
             pending_notification: None,
@@ -1020,6 +1099,7 @@ impl ChatWidget {
             full_reasoning_buffer: String::new(),
             conversation_id: None,
             queued_user_messages: VecDeque::new(),
+            transcript_messages: VecDeque::new(),
             show_welcome_banner: true,
             suppress_session_configured_redraw: true,
             pending_notification: None,
@@ -1195,9 +1275,7 @@ impl ChatWidget {
                 let tx = self.app_event_tx.clone();
                 tokio::spawn(async move {
                     let outcome = crate::pr_checks::run_pr_checks(cwd).await;
-                    tx.send(AppEvent::InsertHistoryCell(Box::new(
-                        history_cell::new_pr_checks_result(outcome),
-                    )));
+                    tx.send(AppEvent::PrChecksCompleted(outcome));
                 });
             }
             SlashCommand::Mention => {
@@ -1292,6 +1370,90 @@ impl ChatWidget {
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
     }
 
+    fn record_transcript_message(&mut self, role: TranscriptRole, text: String) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let normalized = trimmed.to_string();
+        if self
+            .transcript_messages
+            .back()
+            .is_some_and(|entry| entry.role == role && entry.text == normalized)
+        {
+            return;
+        }
+        if self.transcript_messages.len() == MAX_TRANSCRIPT_CONTEXT_MESSAGES {
+            self.transcript_messages.pop_front();
+        }
+        self.transcript_messages.push_back(TranscriptMessage {
+            role,
+            text: normalized,
+        });
+    }
+
+    fn recent_transcript_context(&self) -> Option<String> {
+        if self.transcript_messages.is_empty() {
+            return None;
+        }
+        let entries: Vec<&TranscriptMessage> = self
+            .transcript_messages
+            .iter()
+            .rev()
+            .take(MAX_TRANSCRIPT_CONTEXT_MESSAGES)
+            .collect();
+        let mut formatted = Vec::new();
+        for entry in entries.iter().rev() {
+            formatted.push(Self::format_transcript_entry(entry));
+        }
+        Some(formatted.join("\n"))
+    }
+
+    fn format_transcript_entry(entry: &TranscriptMessage) -> String {
+        let mut out = format!("{}: ", entry.role.label());
+        let mut lines = entry.text.lines();
+        if let Some(first_line) = lines.next() {
+            out.push_str(first_line);
+            for line in lines {
+                out.push('\n');
+                out.push_str("    ");
+                out.push_str(line);
+            }
+        }
+        out
+    }
+
+    #[cfg(not(test))]
+    async fn gather_pr_checks_context(&mut self, cwd: &Path) -> String {
+        self.add_info_message(
+            "Running GitHub PR checks before deep review…".to_string(),
+            Some("gh pr checks --watch".to_string()),
+        );
+
+        let outcome = crate::pr_checks::run_pr_checks(cwd.to_path_buf()).await;
+        self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+            history_cell::new_pr_checks_result(outcome.clone()),
+        )));
+
+        summarize_pr_checks_for_prompt(&outcome)
+    }
+
+    #[cfg(test)]
+    async fn gather_pr_checks_context(&mut self, _cwd: &Path) -> String {
+        "GitHub PR checks summary unavailable in tests.".to_string()
+    }
+
+    fn branch_review_prompt(branch: &str, context: Option<&str>) -> String {
+        let mut prompt = format!(
+            "Review the code changes against the base branch '{branch}'. Start by finding the merge diff between the current branch and {branch}'s upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \"{branch}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes we would merge into the {branch} branch. Provide prioritized, actionable findings."
+        );
+        if let Some(context) = context {
+            prompt.push_str("\n\nRecent chat context (last 10 messages):\n");
+            prompt.push_str(context);
+        }
+        prompt
+    }
+
     fn submit_user_message(&mut self, user_message: UserMessage) {
         let UserMessage { text, image_paths } = user_message;
         if text.is_empty() && image_paths.is_empty() {
@@ -1327,6 +1489,7 @@ impl ChatWidget {
 
         // Only show the text portion in conversation history.
         if !text.is_empty() {
+            self.record_transcript_message(TranscriptRole::User, text.clone());
             self.add_to_history(history_cell::new_user_prompt(text));
         }
         self.needs_final_message_separator = false;
@@ -1549,6 +1712,7 @@ impl ChatWidget {
                         "Reviewer failed to output a response.".to_owned(),
                     ));
                 } else {
+                    self.record_transcript_message(TranscriptRole::Assistant, explanation.clone());
                     // Show explanation when there are no structured findings.
                     let mut rendered: Vec<ratatui::text::Line<'static>> = vec!["".into()];
                     append_markdown(&explanation, None, &mut rendered, &self.config);
@@ -1559,6 +1723,7 @@ impl ChatWidget {
             } else {
                 let message_text =
                     codex_core::review_format::format_review_findings_block(&output.findings, None);
+                self.record_transcript_message(TranscriptRole::Assistant, message_text.clone());
                 let mut message_lines: Vec<ratatui::text::Line<'static>> = Vec::new();
                 append_markdown(&message_text, None, &mut message_lines, &self.config);
                 let body_cell = AgentMessageCell::new(message_lines, true);
@@ -1584,10 +1749,26 @@ impl ChatWidget {
             Some(InputMessageKind::Plain) | None => {
                 let message = event.message.trim();
                 if !message.is_empty() {
+                    self.record_transcript_message(TranscriptRole::User, message.to_string());
                     self.add_to_history(history_cell::new_user_prompt(message.to_string()));
                 }
             }
         }
+    }
+
+    pub(crate) fn on_pr_checks_completed(&mut self, outcome: PrChecksOutcome) {
+        let history_outcome = outcome.clone();
+        self.add_to_history(history_cell::new_pr_checks_result(history_outcome));
+
+        if outcome.spawn_error.is_none() && !outcome.success {
+            let summary = summarize_pr_checks_for_prompt(&outcome);
+            let message = format!(
+                "PR checks are failing. Carefully read the CI logs above, determine the root cause, and fix every failing check. Provide a short summary of the failures before outlining the plan:\n\n{summary}"
+            );
+            self.submit_text_message(message);
+        }
+
+        self.request_redraw();
     }
 
     fn request_redraw(&mut self) {
@@ -2013,6 +2194,19 @@ impl ChatWidget {
         });
 
         items.push(SelectionItem {
+            name: "Review against a base branch (with context)".to_string(),
+            description: Some("includes last 10 messages".into()),
+            actions: vec![Box::new({
+                let cwd = self.config.cwd.clone();
+                move |tx| {
+                    tx.send(AppEvent::OpenReviewBranchPickerWithContext(cwd.clone()));
+                }
+            })],
+            dismiss_on_select: false,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
             name: "Deep review against a base branch".to_string(),
             description: Some("multi-pass orchestrated".into()),
             display_shortcut: None,
@@ -2080,21 +2274,27 @@ impl ChatWidget {
             .unwrap_or_else(|| "(detached HEAD)".to_string());
         let mut items: Vec<SelectionItem> = Vec::with_capacity(branches.len());
         let cwd_owned = cwd.to_path_buf();
+        let context_snippet = matches!(mode, ReviewBranchMode::SimpleWithContext)
+            .then(|| self.recent_transcript_context())
+            .flatten();
 
         for option in branches {
             let branch = option.clone();
             let branch_for_action = branch.clone();
             let action: SelectionAction = match mode {
-                ReviewBranchMode::Simple => Box::new(move |tx3: &AppEventSender| {
-                    tx3.send(AppEvent::CodexOp(Op::Review {
-                        review_request: ReviewRequest {
-                            prompt: format!(
-                                "Review the code changes against the base branch '{branch_for_action}'. Start by finding the merge diff between the current branch and {branch_for_action}'s upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \"{branch_for_action}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes we would merge into the {branch_for_action} branch. Provide prioritized, actionable findings."
-                            ),
-                            user_facing_hint: format!("changes against '{branch_for_action}'"),
-                        },
-                    }));
-                }),
+                ReviewBranchMode::Simple | ReviewBranchMode::SimpleWithContext => {
+                    let prompt =
+                        Self::branch_review_prompt(&branch_for_action, context_snippet.as_deref());
+                    let hint = format!("changes against '{branch_for_action}'");
+                    Box::new(move |tx3: &AppEventSender| {
+                        tx3.send(AppEvent::CodexOp(Op::Review {
+                            review_request: ReviewRequest {
+                                prompt: prompt.clone(),
+                                user_facing_hint: hint.clone(),
+                            },
+                        }));
+                    })
+                }
                 ReviewBranchMode::Deep => {
                     let cwd = cwd_owned.clone();
                     Box::new(move |tx3: &AppEventSender| {
@@ -2115,7 +2315,9 @@ impl ChatWidget {
         }
 
         let title = match mode {
-            ReviewBranchMode::Simple => "Select a base branch".to_string(),
+            ReviewBranchMode::Simple | ReviewBranchMode::SimpleWithContext => {
+                "Select a base branch".to_string()
+            }
             ReviewBranchMode::Deep => "Select a base branch for deep review".to_string(),
         };
         self.bottom_pane.show_selection_view(SelectionViewParams {
@@ -2132,14 +2334,18 @@ impl ChatWidget {
         self.review_branch_orchestrator = None;
         let limits = default_deep_review_chunk_limits();
         let reason = format!("base branch '{base}'");
+        let ci_context = self.gather_pr_checks_context(cwd).await;
         match Orchestrator::new(
             self.app_event_tx.clone(),
             cwd,
             base.to_string(),
             reason,
             limits,
-            DEEP_REVIEW_BATCH_PROMPT,
-            DEEP_REVIEW_CONSOLIDATION_PROMPT,
+            crate::review_branch::orchestrator::OrchestratorPrompts {
+                batch: DEEP_REVIEW_BATCH_PROMPT,
+                consolidation: DEEP_REVIEW_CONSOLIDATION_PROMPT,
+            },
+            ci_context,
         )
         .await
         {
@@ -2396,19 +2602,27 @@ pub(crate) fn show_review_branch_picker_with_entries(
     branches: Vec<String>,
 ) {
     let mut items: Vec<SelectionItem> = Vec::with_capacity(branches.len());
+    let context_snippet = matches!(mode, ReviewBranchMode::SimpleWithContext)
+        .then(|| chat.recent_transcript_context())
+        .flatten();
     for branch in branches {
         let branch_for_action = branch.clone();
         let action: SelectionAction = match mode {
-            ReviewBranchMode::Simple => Box::new(move |tx3: &AppEventSender| {
-                tx3.send(AppEvent::CodexOp(Op::Review {
-                    review_request: ReviewRequest {
-                        prompt: format!(
-                            "Review the code changes against the base branch '{branch_for_action}'. Start by finding the merge diff between the current branch and {branch_for_action}'s upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \"{branch_for_action}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes we would merge into the {branch_for_action} branch. Provide prioritized, actionable findings."
-                        ),
-                        user_facing_hint: format!("changes against '{branch_for_action}'"),
-                    },
-                }));
-            }),
+            ReviewBranchMode::Simple | ReviewBranchMode::SimpleWithContext => {
+                let prompt = ChatWidget::branch_review_prompt(
+                    &branch_for_action,
+                    context_snippet.as_deref(),
+                );
+                let hint = format!("changes against '{branch_for_action}'");
+                Box::new(move |tx3: &AppEventSender| {
+                    tx3.send(AppEvent::CodexOp(Op::Review {
+                        review_request: ReviewRequest {
+                            prompt: prompt.clone(),
+                            user_facing_hint: hint.clone(),
+                        },
+                    }));
+                })
+            }
             ReviewBranchMode::Deep => Box::new(move |tx3: &AppEventSender| {
                 tx3.send(AppEvent::StartDeepReviewAgainstBase {
                     cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -2428,7 +2642,9 @@ pub(crate) fn show_review_branch_picker_with_entries(
     }
 
     let title = match mode {
-        ReviewBranchMode::Simple => "Select a base branch".to_string(),
+        ReviewBranchMode::Simple | ReviewBranchMode::SimpleWithContext => {
+            "Select a base branch".to_string()
+        }
         ReviewBranchMode::Deep => "Select a base branch for deep review".to_string(),
     };
     chat.bottom_pane.show_selection_view(SelectionViewParams {

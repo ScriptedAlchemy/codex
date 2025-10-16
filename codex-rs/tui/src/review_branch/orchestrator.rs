@@ -18,6 +18,11 @@ pub(crate) enum OrchestratorStage {
     Done,
 }
 
+pub(crate) struct OrchestratorPrompts {
+    pub batch: &'static str,
+    pub consolidation: &'static str,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
     Batching,
@@ -36,6 +41,7 @@ pub(crate) struct Orchestrator {
     tx: AppEventSender,
     batch_prompt_tmpl: &'static str,
     consolidation_prompt_tmpl: &'static str,
+    ci_context: String,
 }
 
 impl Orchestrator {
@@ -45,8 +51,8 @@ impl Orchestrator {
         base: String,
         reason: String,
         limits: ChunkLimits,
-        batch_prompt_tmpl: &'static str,
-        consolidation_prompt_tmpl: &'static str,
+        prompts: OrchestratorPrompts,
+        ci_context: String,
     ) -> anyhow::Result<Self> {
         let rows = collect_branch_numstat(cwd, &base).await.unwrap_or_default();
         let batches = score_and_chunk(rows, limits);
@@ -58,8 +64,9 @@ impl Orchestrator {
             idx: 0,
             acc: Vec::new(),
             stage: Stage::Batching,
-            batch_prompt_tmpl,
-            consolidation_prompt_tmpl,
+            batch_prompt_tmpl: prompts.batch,
+            consolidation_prompt_tmpl: prompts.consolidation,
+            ci_context,
         })
     }
 
@@ -123,7 +130,8 @@ impl Orchestrator {
             .replace("{batch_index}", &k.to_string())
             .replace("{batch_total}", &n.to_string())
             .replace("{size_hint}", &size_hint)
-            .replace("{file_list}", &file_list);
+            .replace("{file_list}", &file_list)
+            .replace("{ci_context}", &self.ci_context);
 
         let hint = format!("batch {k}/{n} vs {} ({})", self.base, self.reason);
         self.tx.send(AppEvent::InsertHistoryCell(Box::new(
@@ -144,7 +152,8 @@ impl Orchestrator {
             .consolidation_prompt_tmpl
             .replace("{base}", &self.base)
             .replace("{stats}", &stats_text)
-            .replace("{clusters}", &clusters_text);
+            .replace("{clusters}", &clusters_text)
+            .replace("{ci_context}", &self.ci_context);
         let hint = format!("consolidation vs {}", self.base);
         self.tx.send(AppEvent::InsertHistoryCell(Box::new(
             history_cell::new_review_status_line(
@@ -260,6 +269,7 @@ mod tests {
             tx,
             batch_prompt_tmpl: "{base} {batch_index}/{batch_total} {size_hint} {file_list}",
             consolidation_prompt_tmpl: "{base} {stats} {clusters}",
+            ci_context: "CI status: passing".to_string(),
         };
 
         orc.start();
@@ -281,5 +291,56 @@ mod tests {
             }
         }
         assert!(saw_status && saw_review);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ci_context_is_injected_into_prompts() {
+        let batch = Batch {
+            files: vec![crate::review_branch::chunker::NumstatRow {
+                path: "src/lib.rs".into(),
+                added: 1,
+                deleted: 0,
+            }],
+            total_added: 1,
+            total_deleted: 0,
+        };
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut orc = Orchestrator {
+            base: "origin/main".to_string(),
+            reason: "PR base".to_string(),
+            batches: vec![batch],
+            idx: 0,
+            acc: Vec::new(),
+            stage: Stage::Batching,
+            tx,
+            batch_prompt_tmpl: "{ci_context}",
+            consolidation_prompt_tmpl: "{ci_context}",
+            ci_context: "CI summary".to_string(),
+        };
+
+        orc.start();
+
+        let mut prompts = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::CodexOp(codex_core::protocol::Op::Review { review_request }) = ev {
+                prompts.push(review_request.prompt);
+            }
+        }
+        assert_eq!(prompts, vec!["CI summary".to_string()]);
+
+        let output = ReviewOutputEvent::default();
+        orc.on_batch_result(&output);
+
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::CodexOp(codex_core::protocol::Op::Review { review_request }) = ev {
+                prompts.push(review_request.prompt);
+            }
+        }
+
+        assert_eq!(
+            prompts,
+            vec!["CI summary".to_string(), "CI summary".to_string()]
+        );
     }
 }

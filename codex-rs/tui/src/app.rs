@@ -378,6 +378,11 @@ impl App {
                     .show_review_branch_picker(&cwd, ReviewBranchMode::Simple)
                     .await;
             }
+            AppEvent::OpenReviewBranchPickerWithContext(cwd) => {
+                self.chat_widget
+                    .show_review_branch_picker(&cwd, ReviewBranchMode::SimpleWithContext)
+                    .await;
+            }
             AppEvent::OpenDeepReviewBranchPicker(cwd) => {
                 self.chat_widget
                     .show_review_branch_picker(&cwd, ReviewBranchMode::Deep)
@@ -393,6 +398,9 @@ impl App {
             }
             AppEvent::OpenReviewCustomPrompt => {
                 self.chat_widget.show_review_custom_prompt();
+            }
+            AppEvent::PrChecksCompleted(outcome) => {
+                self.chat_widget.on_pr_checks_completed(outcome);
             }
             AppEvent::FullScreenApprovalRequest(request) => match request {
                 ApprovalRequest::ApplyPatch { cwd, changes, .. } => {

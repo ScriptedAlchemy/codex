@@ -144,6 +144,7 @@ pub struct CodexSpawnOk {
 
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";
 pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 64;
+const AUTO_COMPACT_TRIGGER_USAGE_RATIO: f64 = 0.85;
 
 impl Codex {
     /// Spawn a new [`Codex`] and initialize the session.
@@ -1700,6 +1701,7 @@ pub(crate) async fn run_task(
     // many turns, from the perspective of the user, it is a single turn.
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
     let mut auto_compact_recently_attempted = false;
+    let mut auto_compact_attempted_at_hard_limit = false;
 
     loop {
         // Note that pending_input would be something like a message the user
@@ -1766,9 +1768,29 @@ pub(crate) async fn run_task(
                 let total_usage_tokens = total_token_usage
                     .as_ref()
                     .map(TokenUsage::tokens_in_context_window);
-                let token_limit_reached = total_usage_tokens
-                    .map(|tokens| (tokens as i64) >= limit)
+                let total_usage_tokens_i64 =
+                    total_usage_tokens.map(|tokens| tokens.min(i64::MAX as u64) as i64);
+                let auto_compact_threshold = if limit == i64::MAX {
+                    None
+                } else {
+                    Some((limit as f64 * AUTO_COMPACT_TRIGGER_USAGE_RATIO).ceil() as i64)
+                };
+                let should_trigger_auto_compact =
+                    match (total_usage_tokens_i64, auto_compact_threshold) {
+                        (Some(tokens), Some(threshold)) => tokens >= threshold,
+                        _ => false,
+                    };
+                let token_limit_reached = total_usage_tokens_i64
+                    .map(|tokens| tokens >= limit)
                     .unwrap_or(false);
+                let limit_str = if limit == i64::MAX {
+                    "unknown".to_string()
+                } else {
+                    limit.to_string()
+                };
+                let current_tokens = total_usage_tokens
+                    .map(|tokens| tokens.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
                 let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
                 let mut responses = Vec::<ResponseInputItem>::new();
                 for processed_response_item in processed_items {
@@ -1874,11 +1896,7 @@ pub(crate) async fn run_task(
                 }
 
                 if token_limit_reached {
-                    if auto_compact_recently_attempted {
-                        let limit_str = limit.to_string();
-                        let current_tokens = total_usage_tokens
-                            .map(|tokens| tokens.to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
+                    if auto_compact_attempted_at_hard_limit {
                         let event = Event {
                             id: sub_id.clone(),
                             msg: EventMsg::Error(ErrorEvent {
@@ -1890,12 +1908,39 @@ pub(crate) async fn run_task(
                         sess.send_event(event).await;
                         break;
                     }
+                    sess
+                        .notify_background_event(
+                            &sub_id,
+                            format!(
+                                "Conversation exceeded the context window (limit {limit_str}, current {current_tokens}). Running automatic compact…"
+                            ),
+                        )
+                        .await;
                     auto_compact_recently_attempted = true;
+                    auto_compact_attempted_at_hard_limit = true;
                     compact::run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
                     continue;
                 }
 
-                auto_compact_recently_attempted = false;
+                if should_trigger_auto_compact && !auto_compact_recently_attempted {
+                    sess
+                        .notify_background_event(
+                            &sub_id,
+                            format!(
+                                "Conversation is within 15% of the context window (limit {limit_str}, current {current_tokens}). Running automatic compact…"
+                            ),
+                        )
+                        .await;
+                    auto_compact_recently_attempted = true;
+                    auto_compact_attempted_at_hard_limit = false;
+                    compact::run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
+                    continue;
+                }
+
+                if !should_trigger_auto_compact {
+                    auto_compact_recently_attempted = false;
+                    auto_compact_attempted_at_hard_limit = false;
+                }
 
                 if responses.is_empty() {
                     last_agent_message = get_last_assistant_message_from_turn(

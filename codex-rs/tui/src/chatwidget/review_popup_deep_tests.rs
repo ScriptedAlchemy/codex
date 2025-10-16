@@ -13,6 +13,7 @@ fn review_popup_deep_option_sends_event() {
     chat.open_review_popup();
     // Move from the first item to the deep review option and activate it.
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     let mut found = false;

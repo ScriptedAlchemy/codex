@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 use std::str::FromStr;
 
 #[test]
@@ -27,5 +28,19 @@ fn staged_compact_command_is_registered() {
             .map(|(name, _)| name)
             .any(|name| name == "staged-compact"),
         "expected /staged-compact to be in the built-in command list"
+    );
+}
+
+#[test]
+fn staged_compact_command_metadata_is_stable() {
+    let cmd = SlashCommand::StagedCompact;
+    assert_eq!(cmd.command(), "staged-compact");
+    assert_eq!(
+        cmd.description(),
+        "hierarchically summarize older history while keeping the latest details"
+    );
+    assert!(
+        !cmd.available_during_task(),
+        "/staged-compact should be disabled while tasks are running"
     );
 }

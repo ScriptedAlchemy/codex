@@ -1,6 +1,7 @@
 use super::*;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::pr_checks::PrChecksOutcome;
 use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
@@ -22,6 +23,7 @@ use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::FileChange;
+use codex_core::protocol::InputItem;
 use codex_core::protocol::InputMessageKind;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
@@ -280,6 +282,7 @@ pub(crate) fn make_chatwidget_manual() -> (
         frame_requester: FrameRequester::test_dummy(),
         show_welcome_banner: true,
         queued_user_messages: VecDeque::new(),
+        transcript_messages: VecDeque::new(),
         suppress_session_configured_redraw: false,
         pending_notification: None,
         is_review_mode: false,
@@ -317,6 +320,29 @@ fn drain_insert_history(
         }
     }
     out
+}
+
+fn push_transcript_message(chat: &mut ChatWidget, role: super::TranscriptRole, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let normalized = trimmed.to_string();
+    if chat
+        .transcript_messages
+        .back()
+        .is_some_and(|entry| entry.role == role && entry.text == normalized)
+    {
+        return;
+    }
+    if chat.transcript_messages.len() == super::MAX_TRANSCRIPT_CONTEXT_MESSAGES {
+        chat.transcript_messages.pop_front();
+    }
+    chat.transcript_messages
+        .push_back(super::TranscriptMessage {
+            role,
+            text: normalized,
+        });
 }
 
 fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) -> String {
@@ -781,7 +807,8 @@ fn review_popup_custom_prompt_action_sends_event() {
     // Open the preset selection popup
     chat.open_review_popup();
 
-    // Move selection down to the fifth item: "Custom review instructions"
+    // Move selection down to the sixth item: "Custom review instructions"
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -1020,6 +1047,214 @@ async fn review_branch_picker_escape_navigates_back_then_dismisses() {
         chat.is_normal_backtrack_mode(),
         "expected to be back in normal composer mode"
     );
+}
+
+#[test]
+fn review_branch_prompt_without_context_matches_legacy() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    show_review_branch_picker_with_entries(
+        &mut chat,
+        super::ReviewBranchMode::Simple,
+        "feature",
+        vec!["main".to_string()],
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let mut request = None;
+    while let Ok(ev) = rx.try_recv() {
+        if let AppEvent::CodexOp(Op::Review { review_request }) = ev {
+            request = Some(review_request);
+            break;
+        }
+    }
+
+    let request = request.expect("expected review request");
+    let expected_prompt = format!(
+        "Review the code changes against the base branch '{branch}'. Start by finding the merge diff between the current branch and {branch}'s upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \"{branch}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes we would merge into the {branch} branch. Provide prioritized, actionable findings.",
+        branch = "main"
+    );
+    assert_eq!(request.prompt, expected_prompt);
+    assert_eq!(request.user_facing_hint, "changes against 'main'");
+}
+
+#[test]
+fn review_branch_with_context_appends_recent_transcript() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    for i in 0..12 {
+        push_transcript_message(&mut chat, super::TranscriptRole::User, &format!("user {i}"));
+        push_transcript_message(
+            &mut chat,
+            super::TranscriptRole::Assistant,
+            &format!("assistant {i}"),
+        );
+    }
+
+    show_review_branch_picker_with_entries(
+        &mut chat,
+        super::ReviewBranchMode::SimpleWithContext,
+        "feature",
+        vec!["main".to_string()],
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let mut request = None;
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            AppEvent::CodexOp(Op::Review { review_request }) => {
+                request = Some(review_request);
+                break;
+            }
+            AppEvent::InsertHistoryCell(_) => {}
+            _ => {}
+        }
+    }
+
+    let request = request.expect("expected review request");
+    assert!(
+        request
+            .prompt
+            .contains("Recent chat context (last 10 messages):"),
+        "prompt should include context header"
+    );
+    assert!(
+        request.prompt.contains("User: user 7"),
+        "expected newest user context entries"
+    );
+    assert!(
+        request.prompt.contains("Assistant: assistant 11"),
+        "expected latest assistant context entry"
+    );
+    assert!(
+        !request.prompt.contains("user 6"),
+        "context should drop earlier messages"
+    );
+    assert_eq!(request.user_facing_hint, "changes against 'main'");
+}
+
+#[test]
+fn summarize_pr_checks_for_prompt_handles_outputs() {
+    let long_stdout = "a".repeat(super::MAX_PR_CHECKS_OUTPUT_CHARS + 10);
+    let outcome = PrChecksOutcome {
+        success: false,
+        exit_status: Some(1),
+        stdout: long_stdout,
+        stderr: "job failed: lint".to_string(),
+        spawn_error: None,
+    };
+
+    let summary = super::summarize_pr_checks_for_prompt(&outcome);
+    assert!(summary.contains("Status: failing"));
+    assert!(summary.contains("Exit status: 1"));
+    assert!(summary.contains("stdout:"));
+    assert!(summary.contains("stderr:"));
+    assert!(summary.contains("truncated"));
+}
+
+#[test]
+fn summarize_pr_checks_for_prompt_reports_spawn_error() {
+    let outcome = PrChecksOutcome {
+        success: false,
+        exit_status: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        spawn_error: Some("gh command not found".to_string()),
+    };
+
+    let summary = super::summarize_pr_checks_for_prompt(&outcome);
+    assert!(summary.contains("Status: error"));
+    assert!(summary.contains("Spawn error: gh command not found"));
+}
+
+#[test]
+fn pr_checks_failure_auto_submits_followup_message() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    let outcome = PrChecksOutcome {
+        success: false,
+        exit_status: Some(1),
+        stdout: "check foo failed".to_string(),
+        stderr: String::new(),
+        spawn_error: None,
+    };
+
+    chat.on_pr_checks_completed(outcome);
+
+    let history = drain_insert_history(&mut rx);
+    assert!(
+        !history.is_empty(),
+        "expected PR checks outcome to be recorded in history"
+    );
+
+    let mut submitted = Vec::new();
+    while let Ok(op) = op_rx.try_recv() {
+        if let Op::UserInput { items } = op {
+            submitted.push(items);
+        }
+    }
+
+    assert_eq!(
+        submitted.len(),
+        1,
+        "expected a single follow-up user message"
+    );
+    let items = &submitted[0];
+    assert_eq!(items.len(), 1, "expected text-only follow-up message");
+    match &items[0] {
+        InputItem::Text { text } => {
+            assert!(
+                text.contains("PR checks are failing"),
+                "follow-up message should mention failure: {text:?}"
+            );
+            assert!(
+                text.contains("read the CI logs"),
+                "follow-up message should instruct the agent to read CI logs: {text:?}"
+            );
+            assert!(
+                text.contains("determine the root cause"),
+                "follow-up message should request root cause analysis: {text:?}"
+            );
+            assert!(
+                text.contains("fix every failing check"),
+                "follow-up message should demand fixing checks: {text:?}"
+            );
+            assert!(
+                text.contains("check foo failed"),
+                "follow-up message should include summary"
+            );
+        }
+        other => panic!("unexpected follow-up payload: {other:?}"),
+    }
+}
+
+#[test]
+fn pr_checks_success_does_not_auto_submit() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+
+    let outcome = PrChecksOutcome {
+        success: true,
+        exit_status: Some(0),
+        stdout: "All checks passed".to_string(),
+        stderr: String::new(),
+        spawn_error: None,
+    };
+
+    chat.on_pr_checks_completed(outcome);
+
+    let history = drain_insert_history(&mut rx);
+    assert!(
+        !history.is_empty(),
+        "expected PR checks outcome to be recorded in history"
+    );
+
+    while let Ok(op) = op_rx.try_recv() {
+        if let Op::UserInput { .. } = op {
+            panic!("did not expect follow-up message when checks succeed");
+        }
+    }
 }
 
 fn render_bottom_first_row(chat: &ChatWidget, width: u16) -> String {
