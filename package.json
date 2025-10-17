@@ -3,6 +3,7 @@
   "private": true,
   "description": "Tools for repo-wide maintenance.",
   "scripts": {
+    "build": "node scripts/build-local-cli.mjs",
     "format": "prettier --check *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
     "format:fix": "prettier --write *.json *.md docs/*.md .github/workflows/*.yml **/*.js"
   },

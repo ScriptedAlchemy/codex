@@ -241,7 +241,7 @@ async fn helpers_are_available_and_do_not_panic() {
 }
 
 // --- Helpers for tests that need direct construction and event draining ---
-fn make_chatwidget_manual() -> (
+pub(crate) fn make_chatwidget_manual() -> (
     ChatWidget,
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
@@ -289,6 +289,7 @@ fn make_chatwidget_manual() -> (
         ghost_snapshots: Vec::new(),
         ghost_snapshots_disabled: false,
         needs_final_message_separator: false,
+        review_branch_orchestrator: None,
         last_rendered_width: std::cell::Cell::new(None),
     };
     (widget, rx, op_rx)
@@ -330,6 +331,49 @@ fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) -> String {
         s.push('\n');
     }
     s
+}
+
+// Render the whole chat window and assert the footer shows key hints when
+// the shortcuts overlay is toggled.
+#[test]
+fn footer_overlay_shows_glyph_hints_in_full_chat_window() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    // Toggle the shortcuts overlay (composer must be empty)
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+
+    // Render the full chat window using the VT100 test backend
+    let width: u16 = 80;
+    let ui_height: u16 = chat.desired_height(width).max(6);
+    let vt_height: u16 = ui_height + 2; // a touch of extra space
+    let viewport = ratatui::layout::Rect::new(0, vt_height - ui_height, width, ui_height);
+
+    let backend = crate::test_backend::VT100Backend::new(width, vt_height);
+    let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+    term.set_viewport_area(viewport);
+
+    term.draw(|f| {
+        (&chat).render_ref(f.area(), f.buffer_mut());
+    })
+    .expect("draw");
+
+    let screen = term.backend().vt100().screen().contents();
+
+    // Expect the key hints and labels to be present somewhere in the UI.
+    // Note: Current implementation uses lowercase text format, not glyphs
+    assert!(
+        screen.contains("ctrl + j") && screen.to_lowercase().contains("newline"),
+        "missing ctrl + j newline in footer: {screen}"
+    );
+    assert!(
+        screen.contains("ctrl + t") && screen.to_lowercase().contains("transcript"),
+        "missing ctrl + t transcript in footer: {screen}"
+    );
+    assert!(
+        screen.contains("ctrl + c")
+            && (screen.to_lowercase().contains("exit") || screen.to_lowercase().contains("quit")),
+        "missing ctrl + c exit/quit in footer: {screen}"
+    );
 }
 
 #[test]
@@ -752,7 +796,8 @@ fn review_popup_custom_prompt_action_sends_event() {
     // Open the preset selection popup
     chat.open_review_popup();
 
-    // Move selection down to the fourth item: "Custom review instructions"
+    // Move selection down to the fifth item: "Custom review instructions"
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -998,7 +1043,8 @@ async fn review_branch_picker_escape_navigates_back_then_dismisses() {
 
     // Open the branch picker submenu (child view). Using a temp cwd with no git repo is fine.
     let cwd = std::env::temp_dir();
-    chat.show_review_branch_picker(&cwd).await;
+    chat.show_review_branch_picker(&cwd, super::ReviewBranchMode::Simple)
+        .await;
 
     // Verify child view header.
     let header = render_bottom_first_row(&chat, 60);

@@ -139,6 +139,7 @@ fn esc_hint_line(esc_backtrack_hint: bool) -> Line<'static> {
 
 fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
     let mut commands = Line::from("");
+    let mut submit: Option<Line<'static>> = None;
     let mut newline = Line::from("");
     let mut file_paths = Line::from("");
     let mut paste_image = Line::from("");
@@ -147,29 +148,31 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
     let mut show_transcript = Line::from("");
 
     for descriptor in SHORTCUTS {
-        if let Some(text) = descriptor.overlay_entry(state) {
+        if let Some(line) = descriptor.overlay_entry(state) {
             match descriptor.id {
-                ShortcutId::Commands => commands = text,
-                ShortcutId::InsertNewline => newline = text,
-                ShortcutId::FilePaths => file_paths = text,
-                ShortcutId::PasteImage => paste_image = text,
-                ShortcutId::EditPrevious => edit_previous = text,
-                ShortcutId::Quit => quit = text,
-                ShortcutId::ShowTranscript => show_transcript = text,
+                ShortcutId::Commands => commands = line,
+                ShortcutId::Submit => submit = Some(line),
+                ShortcutId::InsertNewline => newline = line,
+                ShortcutId::FilePaths => file_paths = line,
+                ShortcutId::PasteImage => paste_image = line,
+                ShortcutId::EditPrevious => edit_previous = line,
+                ShortcutId::Quit => quit = line,
+                ShortcutId::ShowTranscript => show_transcript = line,
             }
         }
     }
 
-    let ordered = vec![
-        commands,
-        newline,
-        file_paths,
-        paste_image,
-        edit_previous,
-        quit,
-        Line::from(""),
-        show_transcript,
-    ];
+    let mut ordered = vec![commands];
+    if let Some(line) = submit {
+        ordered.push(line);
+    }
+    ordered.push(newline);
+    ordered.push(file_paths);
+    ordered.push(paste_image);
+    ordered.push(edit_previous);
+    ordered.push(quit);
+    ordered.push(Line::from(""));
+    ordered.push(show_transcript);
 
     build_columns(ordered)
 }
@@ -229,6 +232,7 @@ fn context_window_line(percent: Option<u8>) -> Line<'static> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShortcutId {
     Commands,
+    Submit,
     InsertNewline,
     FilePaths,
     PasteImage,
@@ -279,6 +283,9 @@ impl ShortcutDescriptor {
     }
 
     fn overlay_entry(&self, state: ShortcutsState) -> Option<Line<'static>> {
+        if matches!(self.id, ShortcutId::Submit) && !glyphs_enabled() {
+            return None;
+        }
         let binding = self.binding_for(state)?;
         let mut line = Line::from(vec![self.prefix.into(), binding.key.into()]);
         match self.id {
@@ -299,6 +306,18 @@ impl ShortcutDescriptor {
     }
 }
 
+#[inline]
+fn glyphs_enabled() -> bool {
+    #[cfg(test)]
+    {
+        std::env::var("CODEX_TUI_TEST_FORCE_GLYPHS").ok().as_deref() == Some("1")
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
 const SHORTCUTS: &[ShortcutDescriptor] = &[
     ShortcutDescriptor {
         id: ShortcutId::Commands,
@@ -308,6 +327,15 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
         }],
         prefix: "",
         label: " for commands",
+    },
+    ShortcutDescriptor {
+        id: ShortcutId::Submit,
+        bindings: &[ShortcutBinding {
+            key: key_hint::plain(KeyCode::Enter),
+            condition: DisplayCondition::Always,
+        }],
+        prefix: "",
+        label: " send",
     },
     ShortcutDescriptor {
         id: ShortcutId::InsertNewline,

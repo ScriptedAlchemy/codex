@@ -25,6 +25,7 @@ COMPONENT_DEST_DIR: dict[str, str] = {
     "codex-responses-api-proxy": "codex-responses-api-proxy",
     "rg": "path",
 }
+ 
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,7 +91,7 @@ def main() -> int:
 
     try:
         stage_sources(staging_dir, version, package)
-
+ 
         vendor_src = args.vendor_src.resolve() if args.vendor_src else None
         native_components = PACKAGE_NATIVE_COMPONENTS.get(package, [])
 

@@ -20,6 +20,7 @@ pub enum SlashCommand {
     Compact,
     Undo,
     Diff,
+    PrChecks,
     Mention,
     Status,
     Mcp,
@@ -40,6 +41,7 @@ impl SlashCommand {
             SlashCommand::Undo => "restore the workspace to the last Codex snapshot",
             SlashCommand::Quit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
+            SlashCommand::PrChecks => "run GitHub checks for the current PR",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::Model => "choose what model and reasoning effort to use",
@@ -69,6 +71,7 @@ impl SlashCommand {
             | SlashCommand::Review
             | SlashCommand::Logout => false,
             SlashCommand::Diff
+            | SlashCommand::PrChecks
             | SlashCommand::Mention
             | SlashCommand::Status
             | SlashCommand::Mcp
@@ -99,3 +102,9 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
 fn beta_features_enabled() -> bool {
     std::env::var_os("BETA_FEATURE").is_some()
 }
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod review_command_tests;

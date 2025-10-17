@@ -1548,10 +1548,33 @@ async fn spawn_review_thread(
     sub_id: String,
     review_request: ReviewRequest,
 ) {
-    let model = config.review_model.clone();
-    let review_model_family = find_family_for_model(&model)
-        .unwrap_or_else(|| parent_turn_context.client.get_model_family());
-    // For reviews, disable plan, web_search, view_image regardless of global settings.
+    let configured_review_model = config.review_model.clone();
+    let mut model = configured_review_model
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let review_model_family = match find_family_for_model(&model) {
+        Some(family) => family,
+        None => {
+            let fallback_family = parent_turn_context.client.get_model_family();
+            if model.is_empty() {
+                warn!(
+                    fallback = %fallback_family.slug,
+                    "review model slug missing; falling back to conversation model"
+                );
+            } else {
+                warn!(
+                    requested = %configured_review_model,
+                    fallback = %fallback_family.slug,
+                    "review model slug unsupported; falling back to conversation model"
+                );
+            }
+            model = fallback_family.slug.clone();
+            fallback_family
+        }
+    };
+    // For reviews, disable plan, web_search, view_image, and streamable shell regardless of global settings.
     let mut review_features = config.features.clone();
     review_features.disable(crate::features::Feature::PlanTool);
     review_features.disable(crate::features::Feature::WebSearchRequest);
@@ -1571,6 +1594,7 @@ async fn spawn_review_thread(
     // Build per‑turn client with the requested model/family.
     let mut per_turn_config = (*config).clone();
     per_turn_config.model = model.clone();
+    per_turn_config.review_model = model.clone();
     per_turn_config.model_family = model_family.clone();
     per_turn_config.model_reasoning_effort = Some(ReasoningEffortConfig::Low);
     per_turn_config.model_reasoning_summary = ReasoningSummaryConfig::Detailed;
