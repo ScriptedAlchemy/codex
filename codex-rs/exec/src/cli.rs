@@ -67,6 +67,12 @@ pub struct Cli {
     #[arg(long = "json", alias = "experimental-json", default_value_t = false)]
     pub json: bool,
 
+    /// Enable the experimental PTY-backed background shell tool (unified_exec).
+    /// When enabled, the model will receive the `unified_exec` tool instead of the legacy `shell` tool.
+    /// You can also toggle this via `-c features.unified_exec=true`.
+    #[arg(long = "unified-exec", default_value_t = false)]
+    pub unified_exec: bool,
+
     /// Whether to include the plan tool in the conversation.
     #[arg(long = "include-plan-tool", default_value_t = false)]
     pub include_plan_tool: bool,

@@ -74,4 +74,10 @@ pub struct Cli {
 
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
+
+    /// Enable the experimental PTY-backed background shell tool (unified_exec).
+    /// When enabled, the model will receive the `unified_exec` tool instead of the legacy `shell` tool.
+    /// You can also toggle this via `-c features.unified_exec=true`.
+    #[arg(long = "unified-exec", default_value_t = false)]
+    pub unified_exec: bool,
 }

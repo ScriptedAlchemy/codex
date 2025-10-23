@@ -47,6 +47,42 @@ You can enable notifications by configuring a script that is run whenever the ag
 
 To run Codex non-interactively, run `codex exec PROMPT` (you can also pass the prompt via `stdin`) and Codex will work on your task until it decides that it is done and exits. Output is printed to the terminal directly. You can set the `RUST_LOG` environment variable to see more about what's going on.
 
+### Background shell (unified_exec)
+
+Codex includes an experimental PTY‑backed background shell that keeps an interactive shell (bash/zsh) alive across tool calls.
+
+- Headless: `codex exec --unified-exec "…"`
+- TUI: `codex --unified-exec`
+- Config: in `~/.codex/config.toml`
+
+```
+[features]
+unified_exec = true
+```
+
+When enabled, the model gets a single `unified_exec` tool instead of the legacy `shell` tool.
+
+Common patterns
+
+1) Open a session (spawn an interactive shell):
+
+```
+{"name":"unified_exec","arguments":"{\"input\":[\"bash\",\"-i\"]}"}
+```
+
+The tool returns `{ "session_id": "<int>", "output": "…" }`.
+
+2) Reuse the session:
+
+```
+{"name":"unified_exec","arguments":"{\"session_id\":\"<int>\",\"input\":[\"pwd\\n\"]}"}
+```
+
+Notes:
+- Output is buffered and returned within the requested timeout window.
+- Large outputs are truncated in the middle with a clear marker.
+- Sessions retire automatically when the child exits.
+
 ### Use `@` for file search
 
 Typing `@` triggers a fuzzy-filename search over the workspace root. Use up/down to select among the results and Tab or Enter to replace the `@` with the selected path. You can use Esc to cancel the search.

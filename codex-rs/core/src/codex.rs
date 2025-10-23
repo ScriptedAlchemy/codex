@@ -1112,6 +1112,16 @@ impl Session {
             .await
     }
 
+    pub(crate) async fn terminate_unified_exec_session(
+        &self,
+        session_id: i32,
+    ) -> Result<(), crate::unified_exec::UnifiedExecError> {
+        self.services
+            .unified_exec_manager
+            .terminate_session(session_id)
+            .await
+    }
+
     pub async fn interrupt_task(self: &Arc<Self>) {
         info!("interrupt received: abort current task, if any");
         self.abort_all_tasks(TurnAbortReason::Interrupted).await;

@@ -188,6 +188,31 @@ fn create_unified_exec_tool() -> ToolSpec {
     })
 }
 
+fn create_unified_exec_kill_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "session_id".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Identifier for an existing unified exec session to terminate".to_string(),
+            ),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "unified_exec_kill".to_string(),
+        description:
+            "Terminates a running unified exec session (kills the underlying child process)."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["session_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 fn create_shell_tool() -> ToolSpec {
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -746,6 +771,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::ShellHandler;
     use crate::tools::handlers::TestSyncHandler;
     use crate::tools::handlers::UnifiedExecHandler;
+    use crate::tools::handlers::UnifiedExecKillHandler;
     use crate::tools::handlers::ViewImageHandler;
     use std::sync::Arc;
 
@@ -754,6 +780,7 @@ pub(crate) fn build_specs(
     let shell_handler = Arc::new(ShellHandler);
     let exec_stream_handler = Arc::new(ExecStreamHandler);
     let unified_exec_handler = Arc::new(UnifiedExecHandler);
+    let unified_exec_kill_handler = Arc::new(UnifiedExecKillHandler);
     let plan_handler = Arc::new(PlanHandler);
     let pr_checks_handler = Arc::new(PrChecksHandler);
     let apply_patch_handler = Arc::new(ApplyPatchHandler);
@@ -763,6 +790,8 @@ pub(crate) fn build_specs(
     if config.experimental_unified_exec_tool {
         builder.push_spec(create_unified_exec_tool());
         builder.register_handler("unified_exec", unified_exec_handler);
+        builder.push_spec(create_unified_exec_kill_tool());
+        builder.register_handler("unified_exec_kill", unified_exec_kill_handler);
     } else {
         match &config.shell_type {
             ConfigShellToolType::Default => {
@@ -945,7 +974,13 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "update_plan", "web_search", "view_image"],
+            &[
+                "unified_exec",
+                "unified_exec_kill",
+                "update_plan",
+                "web_search",
+                "view_image",
+            ],
         );
     }
 
@@ -964,7 +999,13 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "update_plan", "web_search", "view_image"],
+            &[
+                "unified_exec",
+                "unified_exec_kill",
+                "update_plan",
+                "web_search",
+                "view_image",
+            ],
         );
     }
 
@@ -1071,14 +1112,16 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "unified_exec_kill",
                 "web_search",
                 "view_image",
                 "test_server/do_something_cool",
             ],
         );
 
+        let do_something_cool = find_tool(&tools, "test_server/do_something_cool");
         assert_eq!(
-            tools[3].spec,
+            do_something_cool.spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
@@ -1186,6 +1229,7 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "unified_exec_kill",
                 "view_image",
                 "test_server/cool",
                 "test_server/do",
@@ -1234,6 +1278,7 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "unified_exec_kill",
                 "apply_patch",
                 RUN_PR_CHECKS_TOOL_NAME,
                 "web_search",
@@ -1301,6 +1346,7 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "unified_exec_kill",
                 "apply_patch",
                 RUN_PR_CHECKS_TOOL_NAME,
                 "web_search",
@@ -1366,6 +1412,7 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "unified_exec_kill",
                 "apply_patch",
                 RUN_PR_CHECKS_TOOL_NAME,
                 "web_search",
@@ -1433,6 +1480,7 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "unified_exec_kill",
                 "apply_patch",
                 RUN_PR_CHECKS_TOOL_NAME,
                 "web_search",
@@ -1537,6 +1585,7 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "unified_exec_kill",
                 "apply_patch",
                 RUN_PR_CHECKS_TOOL_NAME,
                 "web_search",

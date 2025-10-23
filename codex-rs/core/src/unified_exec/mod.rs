@@ -160,6 +160,17 @@ impl Drop for ManagedUnifiedExecSession {
 }
 
 impl UnifiedExecSessionManager {
+    /// Terminates a running unified exec session. Dropping the session causes the
+    /// underlying child to be killed via ExecCommandSession's Drop.
+    pub async fn terminate_session(&self, session_id: i32) -> Result<(), UnifiedExecError> {
+        let mut sessions = self.sessions.lock().await;
+        if sessions.remove(&session_id).is_some() {
+            Ok(())
+        } else {
+            Err(UnifiedExecError::UnknownSessionId { session_id })
+        }
+    }
+
     pub async fn handle_request(
         &self,
         request: UnifiedExecRequest<'_>,

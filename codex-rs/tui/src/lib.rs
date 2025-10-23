@@ -179,7 +179,11 @@ pub async fn run_main(
         show_raw_agent_reasoning: cli.oss.then_some(true),
         tools_web_search_request: cli.web_search.then_some(true),
     };
-    let raw_overrides = cli.config_overrides.raw_overrides.clone();
+    // Collect CLI overrides and force-enable unified_exec when requested.
+    let mut raw_overrides = cli.config_overrides.raw_overrides.clone();
+    if cli.unified_exec {
+        raw_overrides.push("features.unified_exec=true".to_string());
+    }
     let overrides_cli = codex_common::CliConfigOverrides { raw_overrides };
     let cli_kv_overrides = match overrides_cli.parse_overrides() {
         Ok(v) => v,

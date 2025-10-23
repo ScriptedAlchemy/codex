@@ -408,3 +408,87 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unified_exec_kill_session() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.features.enable(Feature::UnifiedExec);
+    });
+    let TestCodex {
+        codex,
+        cwd,
+        session_configured,
+        ..
+    } = builder.build(&server).await?;
+
+    let open_id = "uexec-open";
+    let open_args = serde_json::json!({
+        "input": ["/bin/sh", "-c", "while true; do echo tick; sleep 0.2; done"],
+        "timeout_ms": 100,
+    });
+
+    let kill_id = "uexec-kill";
+    let kill_args = serde_json::json!({
+        "session_id": "0"
+    });
+
+    // After kill, polling the same id should error (UnknownSessionId). We simulate a poll and
+    // expect model-side to see an error; our test asserts the kill tool returned ok.
+    let responses = vec![
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call(open_id, "unified_exec", &serde_json::to_string(&open_args)?),
+            ev_completed("resp-1"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-2"),
+            ev_function_call(
+                kill_id,
+                "unified_exec_kill",
+                &serde_json::to_string(&kill_args)?,
+            ),
+            ev_completed("resp-2"),
+        ]),
+        sse(vec![
+            ev_assistant_message("msg-1", "killed"),
+            ev_completed("resp-3"),
+        ]),
+    ];
+    mount_sse_sequence(&server, responses).await;
+
+    let session_model = session_configured.model.clone();
+    codex
+        .submit(Op::UserTurn {
+            items: vec![InputItem::Text {
+                text: "kill unified exec".into(),
+            }],
+            final_output_json_schema: None,
+            cwd: cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_model,
+            effort: None,
+            summary: ReasoningSummary::Auto,
+        })
+        .await?;
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TaskComplete(_))).await;
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    let bodies = requests
+        .iter()
+        .map(|req| req.body_json::<Value>().expect("request json"))
+        .collect::<Vec<_>>();
+    let outputs = collect_tool_outputs(&bodies)?;
+
+    // Kill tool should return ok JSON (stringified by the handler wrapper)
+    let kill_output = outputs.get(kill_id).expect("missing kill tool output");
+    assert_eq!(kill_output["ok"].as_bool(), Some(true));
+
+    Ok(())
+}

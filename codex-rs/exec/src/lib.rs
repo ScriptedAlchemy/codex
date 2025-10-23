@@ -66,6 +66,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         color,
         last_message_file,
         json: json_mode,
+        unified_exec,
         sandbox_mode: sandbox_mode_cli_arg,
         prompt,
         output_schema: output_schema_path,
@@ -183,6 +184,13 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         tools_web_search_request: None,
     };
     // Parse `-c` overrides.
+    let mut config_overrides = config_overrides;
+    if unified_exec {
+        config_overrides
+            .raw_overrides
+            .push("features.unified_exec=true".to_string());
+    }
+
     let cli_kv_overrides = match config_overrides.parse_overrides() {
         Ok(v) => v,
         Err(e) => {
