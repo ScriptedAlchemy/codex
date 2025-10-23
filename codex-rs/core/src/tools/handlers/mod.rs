@@ -24,6 +24,4 @@ pub use read_file::ReadFileHandler;
 pub use shell::ShellHandler;
 pub use test_sync::TestSyncHandler;
 pub use unified_exec::UnifiedExecHandler;
-mod unified_exec_kill;
-pub use unified_exec_kill::UnifiedExecKillHandler;
 pub use view_image::ViewImageHandler;

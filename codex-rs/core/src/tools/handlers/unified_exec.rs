@@ -18,6 +18,8 @@ struct UnifiedExecArgs {
     session_id: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    terminate: Option<bool>,
 }
 
 #[async_trait]
@@ -35,7 +37,10 @@ impl ToolHandler for UnifiedExecHandler {
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
         let ToolInvocation {
-            session, payload, ..
+            session,
+            turn,
+            payload,
+            ..
         } = invocation;
 
         let args = match payload {
@@ -57,6 +62,7 @@ impl ToolHandler for UnifiedExecHandler {
             input,
             session_id,
             timeout_ms,
+            terminate,
         } = args;
 
         let parsed_session_id = if let Some(session_id) = session_id {
@@ -76,6 +82,7 @@ impl ToolHandler for UnifiedExecHandler {
             session_id: parsed_session_id,
             input_chunks: &input,
             timeout_ms,
+            terminate,
         };
 
         let value = session

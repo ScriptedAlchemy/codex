@@ -33,6 +33,8 @@ pub(crate) struct UnifiedExecRequest<'a> {
     pub session_id: Option<i32>,
     pub input_chunks: &'a [String],
     pub timeout_ms: Option<u64>,
+    /// If true and session_id is provided, terminates the session instead of writing input.
+    pub terminate: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -227,6 +229,17 @@ impl UnifiedExecSessionManager {
             session_id = new_id;
             new_session = Some(managed_session);
         };
+
+        // Handle termination requests
+        if request.session_id.is_some() && request.terminate.unwrap_or(false) {
+            let mut sessions = self.sessions.lock().await;
+            sessions.remove(&session_id);
+            drop(sessions);
+            return Ok(UnifiedExecResult {
+                session_id: None,
+                output: "{\"ok\":true}".to_string(),
+            });
+        }
 
         if request.session_id.is_some() {
             let joined_input = request.input_chunks.join(" ");
@@ -458,6 +471,7 @@ mod tests {
                 session_id: None,
                 input_chunks: &["bash".to_string(), "-i".to_string()],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
         let session_id = open_shell.session_id.expect("expected session_id");
@@ -470,6 +484,7 @@ mod tests {
                     "CODEX_INTERACTIVE_SHELL_VAR=codex\n".to_string(),
                 ],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
 
@@ -478,6 +493,7 @@ mod tests {
                 session_id: Some(session_id),
                 input_chunks: &["echo $CODEX_INTERACTIVE_SHELL_VAR\n".to_string()],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
         assert!(out_2.output.contains("codex"));
@@ -497,6 +513,7 @@ mod tests {
                 session_id: None,
                 input_chunks: &["/bin/bash".to_string(), "-i".to_string()],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
         let session_a = shell_a.session_id.expect("expected session id");
@@ -506,6 +523,7 @@ mod tests {
                 session_id: Some(session_a),
                 input_chunks: &["export CODEX_INTERACTIVE_SHELL_VAR=codex\n".to_string()],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
 
@@ -517,6 +535,7 @@ mod tests {
                     "$CODEX_INTERACTIVE_SHELL_VAR\n".to_string(),
                 ],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
         assert!(!out_2.output.contains("codex"));
@@ -526,6 +545,7 @@ mod tests {
                 session_id: Some(session_a),
                 input_chunks: &["echo $CODEX_INTERACTIVE_SHELL_VAR\n".to_string()],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
         assert!(out_3.output.contains("codex"));
@@ -545,6 +565,7 @@ mod tests {
                 session_id: None,
                 input_chunks: &["bash".to_string(), "-i".to_string()],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
         let session_id = open_shell.session_id.expect("expected session id");
@@ -557,6 +578,7 @@ mod tests {
                     "CODEX_INTERACTIVE_SHELL_VAR=codex\n".to_string(),
                 ],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
 
@@ -565,6 +587,7 @@ mod tests {
                 session_id: Some(session_id),
                 input_chunks: &["sleep 5 && echo $CODEX_INTERACTIVE_SHELL_VAR\n".to_string()],
                 timeout_ms: Some(10),
+                terminate: None,
             })
             .await?;
         assert!(!out_2.output.contains("codex"));
@@ -577,6 +600,7 @@ mod tests {
                 session_id: Some(session_id),
                 input_chunks: &empty,
                 timeout_ms: Some(100),
+                terminate: None,
             })
             .await?;
 
@@ -596,6 +620,7 @@ mod tests {
                 session_id: None,
                 input_chunks: &["echo".to_string(), "codex".to_string()],
                 timeout_ms: Some(120_000),
+                terminate: None,
             })
             .await?;
 
@@ -617,6 +642,7 @@ mod tests {
                 session_id: None,
                 input_chunks: &["/bin/echo".to_string(), "codex".to_string()],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
 
@@ -640,6 +666,7 @@ mod tests {
                 session_id: None,
                 input_chunks: &["/bin/bash".to_string(), "-i".to_string()],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
         let session_id = open_shell.session_id.expect("expected session id");
@@ -649,6 +676,7 @@ mod tests {
                 session_id: Some(session_id),
                 input_chunks: &["exit\n".to_string()],
                 timeout_ms: Some(2_500),
+                terminate: None,
             })
             .await?;
 
@@ -659,6 +687,7 @@ mod tests {
                 session_id: Some(session_id),
                 input_chunks: &[],
                 timeout_ms: Some(100),
+                terminate: None,
             })
             .await
             .expect_err("expected unknown session error");
